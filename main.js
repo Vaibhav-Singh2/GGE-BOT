@@ -447,12 +447,17 @@ async function start() {
         startedAt: Date.now(),
         startCoins: null,
         startRubies: null,
+        startSkips: null,
         currentCoins: null,
         currentRubies: null,
         coinsGained: 0,
         rubiesGained: 0,
         coinsPerHour: 0,
-        rubiesPerHour: 0
+        rubiesPerHour: 0,
+        skipsUsed: 0,
+        skipsUsedMinutes: 0,
+        skipsUsedByType: {},
+        skipsUsedPerHour: 0
       })
     }
 
@@ -648,12 +653,17 @@ async function start() {
               startedAt: Date.now(),
               startCoins: null,
               startRubies: null,
+              startSkips: null,
               currentCoins: null,
               currentRubies: null,
               coinsGained: 0,
               rubiesGained: 0,
               coinsPerHour: 0,
-              rubiesPerHour: 0
+              rubiesPerHour: 0,
+              skipsUsed: 0,
+              skipsUsedMinutes: 0,
+              skipsUsedByType: {},
+              skipsUsedPerHour: 0
             }
             botSessions.set(user.id, session)
           }
@@ -677,10 +687,47 @@ async function start() {
             session.rubiesGained = rawRubies - session.startRubies
           }
 
+          if (obj[1].skipsUsed !== undefined) {
+            session.skipsUsed = Math.max(session.skipsUsed || 0, Number(obj[1].skipsUsed))
+          }
+          if (obj[1].skipsUsedMinutes !== undefined) {
+            session.skipsUsedMinutes = Math.max(session.skipsUsedMinutes || 0, Number(obj[1].skipsUsedMinutes))
+          }
+          if (obj[1].skipsUsedByType) {
+            session.skipsUsedByType = { ...session.skipsUsedByType, ...obj[1].skipsUsedByType }
+          }
+
+          // Fallback skip tracking from resources inventory delta if spendSkip wasn't caught
+          if (obj[1].resources) {
+            const skipKeys = ["1MinSkip", "5MinSkip", "10MinSkip", "30MinSkip", "60MinSkip", "5HourSkip", "24HourSkip"]
+            if (!session.startSkips) {
+              const hasAny = skipKeys.some(k => !isNaN(obj[1].resources[k]) && obj[1].resources[k] != null)
+              if (hasAny) {
+                session.startSkips = {}
+                skipKeys.forEach(k => {
+                  session.startSkips[k] = Number(obj[1].resources[k] || 0)
+                })
+              }
+            } else if (!session.skipsUsed) {
+              let inventoryDrops = 0
+              skipKeys.forEach(k => {
+                const cur = Number(obj[1].resources[k] || 0)
+                const st = Number(session.startSkips[k] || 0)
+                if (st > cur) {
+                  inventoryDrops += (st - cur)
+                }
+              })
+              if (inventoryDrops > 0) {
+                session.skipsUsed = inventoryDrops
+              }
+            }
+          }
+
           const elapsedHours = (Date.now() - session.startedAt) / (1000 * 60 * 60)
           if (elapsedHours >= 0.004) {
             session.coinsPerHour = Math.round(session.coinsGained / elapsedHours)
             session.rubiesPerHour = Math.round(session.rubiesGained / elapsedHours)
+            session.skipsUsedPerHour = Math.round((session.skipsUsed || 0) / elapsedHours)
           }
 
           obj[1].sessionStartedAt = session.startedAt
@@ -690,6 +737,10 @@ async function start() {
           obj[1].rubiesGained = session.rubiesGained
           obj[1].coinsPerHour = session.coinsPerHour
           obj[1].rubiesPerHour = session.rubiesPerHour
+          obj[1].skipsUsed = session.skipsUsed || 0
+          obj[1].skipsUsedMinutes = session.skipsUsedMinutes || 0
+          obj[1].skipsUsedByType = session.skipsUsedByType || {}
+          obj[1].skipsUsedPerHour = session.skipsUsedPerHour || 0
           obj[1].uptimeMs = Date.now() - session.startedAt
 
           const existingStatus = lastUserStatus.get(user.id) || {}

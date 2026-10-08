@@ -347,6 +347,7 @@ parentPort.on("message", async obj => {
                 if (elapsedHours >= 0.004) {
                     status.coinsPerHour = Math.round((status.coinsGained || 0) / elapsedHours)
                     status.rubiesPerHour = Math.round((status.rubiesGained || 0) / elapsedHours)
+                    status.skipsUsedPerHour = Math.round((status.skipsUsed || 0) / elapsedHours)
                 }
                 status.uptimeMs = Date.now() - status.sessionStartedAt
             }

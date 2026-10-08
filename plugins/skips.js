@@ -46,8 +46,24 @@ if (require('node:worker_threads').isMainThread)
         force: true
     }
 
-const { botConfig } = require("../ggeBot")
+const { parentPort } = require("node:worker_threads")
+const { botConfig, status } = require("../ggeBot")
 const { resources } = require('../protocols')
+const ActionType = require("../actions.json")
+
+const skipsUsed = {
+    total: 0,
+    totalMinutes: 0,
+    types: {
+        "1MinSkip": 0,
+        "5MinSkip": 0,
+        "10MinSkip": 0,
+        "30MinSkip": 0,
+        "60MinSkip": 0,
+        "5HourSkip": 0,
+        "24HourSkip": 0
+    }
+}
 
 const MinuteSkipType = Object.freeze({
     MS1: 1,
@@ -126,12 +142,31 @@ function spendSkip(time) {
         return undefined
     }
 
-    // The server's count update may lag behind, so don't offer a type we've just used up
-    resources[skipSources[skip][1]]--
+    const resKey = skipSources[skip][1]
+    resources[resKey]--
+    skipsUsed.total++
+    skipsUsed.totalMinutes += MinuteSkipType[skip]
+    skipsUsed.types[resKey] = (skipsUsed.types[resKey] || 0) + 1
 
-    console.debug("usingSkip", skip)
+    status.skipsUsed = skipsUsed.total
+    status.skipsUsedMinutes = skipsUsed.totalMinutes
+    status.skipsUsedByType = { ...skipsUsed.types }
+    status.resources = resources
+
+    if (status.sessionStartedAt) {
+        const elapsedHours = (Date.now() - status.sessionStartedAt) / (1000 * 60 * 60)
+        if (elapsedHours >= 0.004) {
+            status.skipsUsedPerHour = Math.round(skipsUsed.total / elapsedHours)
+        }
+    }
+
+    if (parentPort) {
+        parentPort.postMessage([ActionType.StatusUser, status])
+    }
+
+    console.debug("usingSkip", skip, `(session used: ${skipsUsed.total})`)
 
     return skip
 }
 
-module.exports = { spendSkip, haveEnoughSkips, MinuteSkipType }
+module.exports = { spendSkip, haveEnoughSkips, MinuteSkipType, skipsUsed }
