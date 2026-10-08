@@ -22,6 +22,11 @@ Some info on the plugins:
   Replace Mead Storm will only replace mead if it sees there is 2.1 hours left.
   Attack khan does not replenish your defences alone.
 
+Recruit plugin (plugins/recruit.js):
+  castles field format: areaID:wodID:slotID:amount (comma or newline separated per entry).
+  My current castles config:
+    1465864:206:0:110,1465864:620:0:80,1486758:2026:2:90,1497565:2069:1:110,1652583:2069:3:110
+
 What you need to do to use (Windows):
   https://github.com/darrenthebozz/GGE-BOT/releases/download/Release3/installer.exe
 

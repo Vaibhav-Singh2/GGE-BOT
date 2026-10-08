@@ -1,0 +1,1166 @@
+diff --git a/ggeBot.js b/ggeBot.js
+index fcdd090..722f12b 100644
+--- a/ggeBot.js
++++ b/ggeBot.js
+@@ -87,7 +87,7 @@ const waitForResult = (key, timeout, func) => new Promise((resolve, reject) => {
+     let timer
+     let result
+     const checkForIssues = () => {
+-        if (["LORD_IS_USED", "ATTACK_TOO_MANY_UNITS", "ATTACK_TOO_MANY_UNITS", "MISSING_UNITS"].includes(err[result]))
++        if (["LORD_IS_USED", "ATTACK_TOO_MANY_UNITS", "ATTACK_TOO_MANY_UNITS"].includes(err[result]))
+             importantErrors++
+         if (importantErrors == 8) {
+             console.error("closedReason", "tooManyImportantErrors")
+@@ -132,6 +132,12 @@ const waitForResult = (key, timeout, func) => new Promise((resolve, reject) => {
+             return
+         if(_result != 0)
+             console.warn(key, msg)
++        else {
++            // Count consecutive failures, not lifetime ones: otherwise a long
++            // session eventually pauses the socket or exits on scattered errors.
++            timedOut = 0
++            importantErrors = 0
++        }
+ 
+         xtHandler.removeListener(key, helperFunction)
+         clearInterval(timer)
+diff --git a/plugins/attack/attack.js b/plugins/attack/attack.js
+index be0ca2f..6c67ba5 100644
+--- a/plugins/attack/attack.js
++++ b/plugins/attack/attack.js
+@@ -233,6 +233,13 @@ let alreadyRunning = false
+ let attackCount = undefined
+ let attackThreshold = undefined
+ 
++// Timestamp of the most recent dispatch out of the shared queue below, exposed
++// so other movement-creating actions outside this queue (e.g. a kingdom troop
++// transfer) can avoid landing in the same server-side army-creation settling
++// window and triggering CANT_START_NEW_ARMIES.
++let lastDispatchAt = 0
++const getLastAttackDispatchAt = () => lastDispatchAt
++
+ if([,""].includes(pluginOptions.attackLimit))
+     pluginOptions.attackLimit = 3500
+     
+@@ -275,6 +282,7 @@ const waitToAttack = callback => new Promise(async (resolve, reject) => {
+ 
+                 console.debug("attackDelayAttack", naturalDelay)
+ 
++                lastDispatchAt = Date.now()
+                 if (!await(attacks.shift()()))
+                     continue
+ 
+@@ -291,6 +299,7 @@ module.exports = {
+     getAttackInfo,
+     assignUnit,
+     waitToAttack,
++    getLastAttackDispatchAt,
+     getTotalAmountToolsFlank,
+     getTotalAmountToolsFront,
+     getAmountSoldiersFlank,
+diff --git a/plugins/attack/attackBerimondInvasion.js b/plugins/attack/attackBerimondInvasion.js
+index 8d2ac1a..ad82259 100644
+--- a/plugins/attack/attackBerimondInvasion.js
++++ b/plugins/attack/attackBerimondInvasion.js
+@@ -1,6 +1,25 @@
+ if (require('node:worker_threads').isMainThread)
+     return module.exports = {
+         pluginOptions: [
++            {
++                type: "Checkbox",
++                key: "eventWallToolsFirst"
++            },
++            {
++                type: "Checkbox",
++                key: "skipWallGateTools",
++                default: false
++            },
++            {
++                type: "Checkbox",
++                key: "lowValueChests",
++                default: false
++            },
++            {
++                type: "Checkbox",
++                key: "noChests",
++                default: false
++            },
+             {
+                 type: "Checkbox",
+                 key: "useFeather",
+@@ -16,35 +35,40 @@ if (require('node:worker_threads').isMainThread)
+                 key: "commanderWhiteList",
+                 default: "1-99"
+             },
++            {
++                type: "Text",
++                key: "commanderTroopConfig",
++                default: ""
++            },
+             {
+                 type: "Checkbox",
+-                key: "lowValueChests",
++                key: "reputation",
+                 default: false
+             },
++            { type: "Label", key: "attackSettings" },
+             {
+                 type: "Text",
+-                key: "wavesTillChests",
+-                default: "4"
++                key: "targetCoordinates",
++                default: ""
+             },
+             {
+                 type: "Checkbox",
+-                key: "noEventTools",
++                key: "attackLeft",
+                 default: false
+             },
+             {
+                 type: "Checkbox",
+-                key: "reputation",
++                key: "attackMiddle",
+                 default: false
+             },
+             {
+                 type: "Checkbox",
+-                key: "foodTroopsOnly",
++                key: "attackRight",
+                 default: false
+             }
+         ]
+ 
+     }
+-const { spendSkip } = require("../skips.js")
+ const { movementEvents, ClassTypes, castles, ClientCommands, AreaType, KingdomID } = require("../../protocols.js")
+ const { waitToAttack, getAttackInfo, assignUnit, getTotalAmountToolsFlank, getTotalAmountToolsFront, getAmountSoldiersFlank, getAmountSoldiersFront, getMaxUnitsInReinforcementWave } = require("./attack.js")
+ const { waitForCommanderAvailable, freeCommander, useCommander } = require('../commander.js')
+@@ -62,30 +86,6 @@ const type = AreaType.beriCamp
+ const minTroopCount = 100
+ const eventID = 85
+ 
+-const skipTarget = async areaInfo => {
+-    while (areaInfo.extraData[2] > 0) {
+-        let skip = spendSkip(areaInfo.extraData[2])
+-
+-        if (skip == undefined)
+-            throw new Error("couldntFindSkip")
+-
+-        const { result } = await ClientCommands.skipTarget(type, areaInfo.x, areaInfo.y, kingdomID, skip)
+-
+-        if (result != 0)
+-            break
+-    }
+-}
+-
+-movementEvents.on("returning", (/** @type {import("../../protocols.js").ClassTypes.Movement} */ movement) => {
+-    if (movement.targetOwner.ownerID != playerInfo.playerID)
+-        return
+-
+-    if (movement.sourceAttack.type != type)
+-        return
+-
+-    skipTarget(movement.sourceAttack)
+-})
+-
+ let quit = false
+ 
+ events.on("eventStop", eventInfo => {
+@@ -106,9 +106,44 @@ events.on("eventStart", async eventInfo => {
+ 
+     const castle = castles.find(e => e.kingdomID == kingdomID && e.areaInfo.type == AreaType.mainCastle)
+ 
+-    const areas = (await ClientCommands.getAreaInfo(kingdomID,
+-        castle.areaInfo.x - 50, castle.areaInfo.y - 50,
+-        castle.areaInfo.x + 50, castle.areaInfo.y + 50)).areaInfo.filter(ai => ai.type == type)
++    // Optional "x:y,x:y,..." list restricting attacks to specific camps instead
++    // of every beriCamp found around the main castle.
++    const targetCoords = String(pluginOptions.targetCoordinates || "")
++        .split(",")
++        .map(s => s.trim())
++        .filter(Boolean)
++        .map(s => {
++            const [x, y] = s.split(":").map(Number)
++            return { x, y }
++        })
++        .filter(({ x, y }) => Number.isFinite(x) && Number.isFinite(y))
++
++    // Widen the scan box to cover the requested coordinates (falls back to the
++    // castle-centered box when none are given), so targets outside the default
++    // +/-50 radius still get found.
++    const boxPoints = targetCoords.length > 0 ? targetCoords : [{ x: castle.areaInfo.x, y: castle.areaInfo.y }]
++    const boxPad = targetCoords.length > 0 ? 5 : 50
++    const x1 = Math.min(castle.areaInfo.x, ...boxPoints.map(p => p.x)) - boxPad
++    const y1 = Math.min(castle.areaInfo.y, ...boxPoints.map(p => p.y)) - boxPad
++    const x2 = Math.max(castle.areaInfo.x, ...boxPoints.map(p => p.x)) + boxPad
++    const y2 = Math.max(castle.areaInfo.y, ...boxPoints.map(p => p.y)) + boxPad
++
++    const foundAreas = (await ClientCommands.getAreaInfo(kingdomID, x1, y1, x2, y2))
++        .areaInfo.filter(ai => ai.type == type)
++
++    const areas = targetCoords.length > 0
++        ? targetCoords.map(({ x, y }) => foundAreas.find(ai => ai.x == x && ai.y == y)).filter(Boolean)
++        : foundAreas
++
++    if (targetCoords.length > 0 && areas.length == 0) {
++        console.warn("noBerimondCampsFoundAtGivenCoordinates", JSON.stringify(targetCoords))
++        quit = true
++        return
++    }
++    if (targetCoords.length > 0 && areas.length < targetCoords.length) {
++        console.warn("someBerimondCoordinatesNotCamps",
++            JSON.stringify(targetCoords.filter(({ x, y }) => !areas.some(a => a.x == x && a.y == y))))
++    }
+ 
+     while (!quit) {
+         const commander = await waitForCommanderAvailable(pluginOptions.commanderWhiteList)
+@@ -118,7 +153,6 @@ events.on("eventStart", async eventInfo => {
+ 
+                 areas.push(areaInfo)
+ 
+-                await skipTarget(areaInfo)
+                 const level = areaInfo.extraData[1] + areaInfo.extraData[6] == 100 ? 70 : 56
+ 
+                 const attackerMeleeTroops = []
+@@ -137,7 +171,7 @@ events.on("eventStart", async eventInfo => {
+                     if (unit.unitInfo.wodID == 277)
+                         continue
+ 
+-                    else if (unit.unitInfo.pointBonus && !pluginOptions.noEventTools) {
++                    else if (unit.unitInfo.pointBonus) {
+                         if (unit.unitInfo.gateBonus)
+                             attackerGateBerimondTools.push(unit)
+                         else if (unit.unitInfo.wallBonus)
+@@ -147,7 +181,7 @@ events.on("eventStart", async eventInfo => {
+                         else if (!pluginOptions.reputation)
+                             attackerBerimondTools.push(unit)
+                     }
+-                    else if (unit.unitInfo.reputationBonus && pluginOptions.reputation && !pluginOptions.noEventTools) {
++                    else if (unit.unitInfo.reputationBonus && pluginOptions.reputation) {
+                         attackerBerimondTools.push(unit)
+                     }
+                     else if (
+@@ -209,100 +243,153 @@ events.on("eventStart", async eventInfo => {
+                 attackerShieldBerimondTools.push(...attackerShieldTools)
+ 
+                 const commanderStats = commander.getEffects()
++                const commSlot = commander.lordPosition + 1
++                const configEntry = String(pluginOptions.commanderTroopConfig || "").split(",").map(e => e.trim()).find(e => e.startsWith(commSlot + ":"))
++                const [, configFront, configCy] = configEntry?.split(":").map(Number) ?? []
+                 const attackInfo = getAttackInfo(kingdomID, castle, areaInfo, commander, level, undefined, pluginOptions, commanderStats.additionalWaves)
+ 
+                 const maxToolsFlank = getTotalAmountToolsFlank(level, 0)
+                 const maxToolsFront = getTotalAmountToolsFront(level)
+-                const maxTroopFront = getAmountSoldiersFront(level, commanderStats.attackUnitAmountFront)
++                const maxTroopFront = configFront || getAmountSoldiersFront(level, commanderStats.attackUnitAmountFront)
+                 const maxTroopFlank = getAmountSoldiersFlank(level, commanderStats.attackUnitAmountFlank)
+                 const desiredToolCount = attackerBerimondTools.length == 0 ? 20 : 10
++                const shieldCap = () =>
++                    (attackerShieldBerimondTools[0]?.unitInfo?.pointBonus || attackerShieldBerimondTools[0]?.unitInfo?.reputationBonus) ? 3 : 10
++                const autoConfigure = !(pluginOptions.attackLeft || pluginOptions.attackRight || pluginOptions.attackMiddle)
+ 
+                 attackInfo.A.forEach((wave, index) => {
+                     let maxTools = maxToolsFlank
+                     if (index == 0) {
+-                        wave.L.T.forEach((unitSlot, i) =>
+-                            maxTools -= assignUnit(unitSlot, i == 0 ?
+-                                attackerWallBerimondTools : attackerShieldBerimondTools, Math.min(maxTools, desiredToolCount)))
++                        if (autoConfigure || pluginOptions.attackLeft) {
++                            maxTools = maxToolsFlank
++                            wave.L.T.forEach((unitSlot, i) => {
++                                if (pluginOptions.skipWallGateTools && i == 0) return
++                                maxTools -= assignUnit(unitSlot, i == 0 ?
++                                    attackerWallBerimondTools : attackerShieldBerimondTools,
++                                    i == 0 ? Math.min(maxTools, desiredToolCount) : Math.min(maxTools, shieldCap()))
++                            })
++                        }
+ 
+-                        maxTools = maxToolsFlank
+-                        wave.R.T.forEach((unitSlot, i) =>
+-                            maxTools -= assignUnit(unitSlot, i == 0 ?
+-                                attackerWallBerimondTools : attackerShieldBerimondTools, Math.min(maxTools, desiredToolCount)))
++                        if (autoConfigure || pluginOptions.attackRight) {
++                            maxTools = maxToolsFlank
++                            wave.R.T.forEach((unitSlot, i) => {
++                                if (pluginOptions.skipWallGateTools && i == 0) return
++                                maxTools -= assignUnit(unitSlot, i == 0 ?
++                                    attackerWallBerimondTools : attackerShieldBerimondTools,
++                                    i == 0 ? Math.min(maxTools, desiredToolCount) : Math.min(maxTools, shieldCap()))
++                            })
++                        }
+ 
+-                        maxTools = maxToolsFront
+-                        wave.M.T.forEach((unitSlot, i) =>
+-                            maxTools -= assignUnit(unitSlot, i == 0 ? attackerWallBerimondTools :
+-                                i == 1 ? attackerGateBerimondTools : attackerShieldBerimondTools, Math.min(maxTools, desiredToolCount)))
++                        if (autoConfigure || pluginOptions.attackMiddle) {
++                            maxTools = maxToolsFront
++                            wave.M.T.forEach((unitSlot, i) => {
++                                if (pluginOptions.skipWallGateTools && i <= 1) return
++                                maxTools -= assignUnit(unitSlot, i == 0 ? attackerWallBerimondTools :
++                                    i == 1 ? attackerGateBerimondTools : attackerShieldBerimondTools,
++                                    i == 2 ? Math.min(maxTools, shieldCap()) : Math.min(maxTools, desiredToolCount))
++                            })
++                        }
+ 
+                         let maxTroops = maxTroopFlank
+ 
+-                        wave.L.U.forEach(unitSlot =>
+-                            maxTroops -= assignUnit(unitSlot, attackerRangeTroops.length <= 0 ?
+-                                attackerMeleeTroops : attackerRangeTroops, maxTroops))
+-                        maxTroops = maxTroopFlank
+-                        wave.R.U.forEach(unitSlot =>
+-                            maxTroops -= assignUnit(unitSlot, attackerRangeTroops.length <= 0 ?
+-                                attackerMeleeTroops : attackerRangeTroops, maxTroops))
+-                        maxTroops = maxTroopFront
+-                        wave.M.U.forEach(unitSlot =>
+-                            maxTroops -= assignUnit(unitSlot, attackerRangeTroops.length <= 0 ?
+-                                attackerMeleeTroops : attackerRangeTroops, maxTroops))
++                        if (autoConfigure || pluginOptions.attackLeft) {
++                            maxTroops = maxTroopFlank
++                            wave.L.U.forEach(unitSlot =>
++                                maxTroops -= assignUnit(unitSlot, attackerRangeTroops.length <= 0 ?
++                                    attackerMeleeTroops : attackerRangeTroops, maxTroops))
++                        }
++                        if (autoConfigure || pluginOptions.attackRight) {
++                            maxTroops = maxTroopFlank
++                            wave.R.U.forEach(unitSlot =>
++                                maxTroops -= assignUnit(unitSlot, attackerRangeTroops.length <= 0 ?
++                                    attackerMeleeTroops : attackerRangeTroops, maxTroops))
++                        }
++                        if (autoConfigure || pluginOptions.attackMiddle) {
++                            maxTroops = maxTroopFront
++                            wave.M.U.forEach(unitSlot =>
++                                maxTroops -= assignUnit(unitSlot, attackerRangeTroops.length <= 0 ?
++                                    attackerMeleeTroops : attackerRangeTroops, maxTroops))
++                        }
+                         attackerMeleeTroops.sort((a, b) => Number(a.unitInfo.meleeAttack) - Number(b.unitInfo.meleeAttack))
+                         attackerRangeTroops.sort((a, b) => Number(a.unitInfo.rangeAttack) - Number(b.unitInfo.rangeAttack))
++                        return
+                     }
+-                    else if (!pluginOptions.noeventTools) {
++                    else if (!pluginOptions.noChests) {
+                         const selectTool = i => {
+-                            let tools = attackerBerimondTools
+-                            if (tools.length == 0 || ((!tools[0]?.unitInfo.pointBonus && !tools[0]?.unitInfo.reputationBonus))) {
++                            if (pluginOptions.reputation) {
++                                // Reputation mode: never fall back to the wall/gate/shield
++                                // buckets, since those are always point-bonus tools by how
++                                // they're categorized. Only the generic reputation-bonus
++                                // bucket is eligible; otherwise leave the slot empty.
++                                return attackerBerimondTools.length > 0 && attackerBerimondTools[0]?.unitInfo.reputationBonus
++                                    ? attackerBerimondTools : []
++                            }
++
++                            let tools = pluginOptions.eventWallToolsFirst ? [] : attackerBerimondTools
++                            if (tools.length == 0 || !tools[0]?.unitInfo.pointBonus) {
+                                 if (i == 0) {
+                                     tools = attackerWallBerimondTools
+-                                    if (tools.length == 0 || (!tools[0]?.unitInfo.pointBonus && !tools[0]?.unitInfo.reputationBonus))
++                                    if (tools.length == 0 || !tools[0]?.unitInfo.pointBonus)
+                                         tools = attackerShieldBerimondTools
+                                 }
+                                 else if (i == 1) {
+                                     tools = attackerShieldBerimondTools
+-                                    if (tools.length == 0 || (!tools[0]?.unitInfo.pointBonus && !tools[0]?.unitInfo.reputationBonus))
++                                    if (tools.length == 0 || !tools[0]?.unitInfo.pointBonus)
+                                         tools = attackerWallBerimondTools
+                                 }
+                                 if (i == 2) {
+                                     tools = attackerGateBerimondTools
+-                                    if (tools.length == 0 || (!tools[0]?.unitInfo.pointBonus && !tools[0]?.unitInfo.reputationBonus))
++                                    if (tools.length == 0 || !tools[0]?.unitInfo.pointBonus)
+                                         tools = attackerWallBerimondTools
+-                                    if (tools.length == 0 || (!tools[0]?.unitInfo.pointBonus && !tools[0]?.unitInfo.reputationBonus))
++                                    if (tools.length == 0 || !tools[0]?.unitInfo.pointBonus)
+                                         tools = attackerShieldBerimondTools
+                                 }
+-                                if ((!tools[0]?.unitInfo.pointBonus && !tools[0]?.unitInfo.reputationBonus))
++                                if (!tools[0]?.unitInfo.pointBonus)
+                                     tools = []
+                             }
+ 
+                             return tools
+                         }
+ 
+-                        wave.L.T.forEach((unitSlot, i) =>
+-                            maxTools -= assignUnit(unitSlot, selectTool(0), maxTools))
+-                        maxTools = maxToolsFlank
+-                        wave.R.T.forEach((unitSlot, i) =>
+-                            maxTools -= assignUnit(unitSlot, selectTool(1), maxTools))
+-                        maxTools = maxToolsFront
+-                        wave.M.T.forEach((unitSlot, i) =>
+-                            maxTools -= assignUnit(unitSlot, selectTool(2), maxTools))
++                        if (autoConfigure || pluginOptions.attackLeft) {
++                            maxTools = maxToolsFlank
++                            wave.L.T.forEach((unitSlot, i) =>
++                                maxTools -= assignUnit(unitSlot, selectTool(0), maxTools))
++                        }
++                        if (autoConfigure || pluginOptions.attackRight) {
++                            maxTools = maxToolsFlank
++                            wave.R.T.forEach((unitSlot, i) =>
++                                maxTools -= assignUnit(unitSlot, selectTool(1), maxTools))
++                        }
++                        if (autoConfigure || pluginOptions.attackMiddle) {
++                            maxTools = maxToolsFront
++                            wave.M.T.forEach((unitSlot, i) =>
++                                maxTools -= assignUnit(unitSlot, selectTool(2), maxTools))
++                        }
++                    }
+ 
+-                        let maxTroops = maxTroopFlank
++                    let maxTroops = maxTroopFlank
+ 
++                    if (autoConfigure || pluginOptions.attackLeft) {
++                        maxTroops = maxTroopFlank
+                         wave.L.U.forEach((unitSlot, i) =>
+                             maxTroops -= assignUnit(unitSlot, attackerMeleeTroops.length <= 0 ?
+                                 attackerRangeTroops : attackerMeleeTroops, maxTroops))
++                    }
++                    if (autoConfigure || pluginOptions.attackRight) {
+                         maxTroops = maxTroopFlank
+                         wave.R.U.forEach((unitSlot, i) =>
+                             maxTroops -= assignUnit(unitSlot, attackerMeleeTroops.length <= 0 ?
+                                 attackerRangeTroops : attackerMeleeTroops, maxTroops))
++                    }
++                    if (autoConfigure || pluginOptions.attackMiddle) {
+                         maxTroops = maxTroopFront
+                         wave.M.U.forEach((unitSlot, i) =>
+                             maxTroops -= assignUnit(unitSlot, attackerRangeTroops.length <= 0 ?
+                                 attackerMeleeTroops : attackerRangeTroops, maxTroops))
+                     }
+                 })
+-                let maxTroops = getMaxUnitsInReinforcementWave(playerInfo.level, level) + Number(0 | commanderStats.attackUnitAmountReinforcementBonus)
++                let maxTroops = configCy || (getMaxUnitsInReinforcementWave(playerInfo.level, level) + Number(0 | commanderStats.attackUnitAmountReinforcementBonus))
+                 attackInfo.RW.forEach((unitSlot, i) => {
+                     let attacker = i & 1 ?
+                         (attackerMeleeTroops.length > 0 ? attackerMeleeTroops : attackerRangeTroops) :
+diff --git a/plugins/attack/attackNomads.js b/plugins/attack/attackNomads.js
+index ac6abd7..bbf5a65 100644
+--- a/plugins/attack/attackNomads.js
++++ b/plugins/attack/attackNomads.js
+@@ -24,6 +24,11 @@ if (require('node:worker_threads').isMainThread)
+                 type: "Checkbox",
+                 key: "eventWallToolsFirst"
+             },
++            {
++                type: "Checkbox",
++                key: "skipWallGateTools",
++                default: false
++            },
+             {
+                 type: "Checkbox",
+                 key: "lowValueChests",
+@@ -59,9 +64,30 @@ if (require('node:worker_threads').isMainThread)
+                 key: "commanderWhiteList",
+                 default: "1-99"
+             },
++            {
++                type: "Text",
++                key: "commanderTroopConfig",
++                default: ""
++            },
+             {
+                 type: "Text",
+                 key: "scoreShutoff"
++            },
++            { type: "Label", key: "attackSettings" },
++            {
++                type: "Checkbox",
++                key: "attackLeft",
++                default: false
++            },
++            {
++                type: "Checkbox",
++                key: "attackMiddle",
++                default: false
++            },
++            {
++                type: "Checkbox",
++                key: "attackRight",
++                default: false
+             }
+         ]
+ 
+@@ -270,41 +296,71 @@ events.on("eventStart", async eventInfo => {
+                 const maxToolsFlank = getTotalAmountToolsFlank(level, 0)
+                 const maxToolsFront = getTotalAmountToolsFront(level)
+                 const commanderStats = commander.getEffects()
++                const commSlot = commander.lordPosition + 1
++                const configEntry = String(pluginOptions.commanderTroopConfig || "").split(",").map(e => e.trim()).find(e => e.startsWith(commSlot + ":"))
++                const [, configFront, configCy] = configEntry?.split(":").map(Number) ?? []
++                console.log(`commanderSlot ${commSlot} (${commander.name}) - front: ${configFront ?? "formula"}, courtyard: ${configCy ?? "formula"}`)
+                 const attackInfo = getAttackInfo(kingdomID, castle, areaInfo, commander, level, undefined, pluginOptions, commanderStats.additionalWaves)
+-                const maxTroopFront = getAmountSoldiersFront(level, commanderStats.attackUnitAmountFront)
++                const maxTroopFront = configFront || getAmountSoldiersFront(level, commanderStats.attackUnitAmountFront)
+                 const maxTroopFlank = getAmountSoldiersFlank(level, commanderStats.attackUnitAmountFlank)
+-                const desiredToolCount = attackerNomadTools.length == 0 ? 40 : 10
++                const desiredToolCount = 10
++                const autoConfigure = !(pluginOptions.attackLeft || pluginOptions.attackRight || pluginOptions.attackMiddle)
+ 
+                 attackInfo.A.forEach((wave, index) => {
+                     let maxTools = maxToolsFlank
+                     if (index == 0) {
+-                        wave.L.T.forEach((unitSlot, i) =>
+-                            maxTools -= assignUnit(unitSlot, i == 0 ?
+-                                attackerWallNomadTools : attackerShieldNomadTools, Math.min(maxTools / 2, desiredToolCount)))
++                        const shieldCap = (fallbackCap) =>
++                            attackerShieldNomadTools[0]?.unitInfo?.khanTabletBooster != undefined ? 5 : fallbackCap
++
++                        if (autoConfigure || pluginOptions.attackLeft) {
++                            maxTools = maxToolsFlank
++                            wave.L.T.forEach((unitSlot, i) => {
++                                if (pluginOptions.skipWallGateTools && i == 0) return
++                                maxTools -= assignUnit(unitSlot, i == 0 ?
++                                    attackerWallNomadTools : attackerShieldNomadTools,
++                                    i == 0 ? Math.min(maxTools / 2, desiredToolCount) : shieldCap(Math.min(maxTools / 2, desiredToolCount)))
++                            })
++                        }
+ 
+-                        maxTools = maxToolsFlank
+-                        wave.R.T.forEach((unitSlot, i) =>
+-                            maxTools -= assignUnit(unitSlot, i == 0 ?
+-                                attackerWallNomadTools : attackerShieldNomadTools, Math.min(maxTools / 2, desiredToolCount)))
++                        if (autoConfigure || pluginOptions.attackRight) {
++                            maxTools = maxToolsFlank
++                            wave.R.T.forEach((unitSlot, i) => {
++                                if (pluginOptions.skipWallGateTools && i == 0) return
++                                maxTools -= assignUnit(unitSlot, i == 0 ?
++                                    attackerWallNomadTools : attackerShieldNomadTools,
++                                    i == 0 ? Math.min(maxTools / 2, desiredToolCount) : shieldCap(Math.min(maxTools / 2, desiredToolCount)))
++                            })
++                        }
+ 
+-                        maxTools = maxToolsFront
+-                        wave.M.T.forEach((unitSlot, i) =>
+-                            maxTools -= assignUnit(unitSlot, i == 0 ? attackerWallNomadTools :
+-                                i == 1 ? attackerGateNomadTools : attackerShieldNomadTools, Math.min(maxTools / 3, desiredToolCount)))
++                        if (autoConfigure || pluginOptions.attackMiddle) {
++                            maxTools = maxToolsFront
++                            wave.M.T.forEach((unitSlot, i) => {
++                                if (pluginOptions.skipWallGateTools && i <= 1) return
++                                maxTools -= assignUnit(unitSlot, i == 0 ? attackerWallNomadTools :
++                                    i == 1 ? attackerGateNomadTools : attackerShieldNomadTools,
++                                    i == 2 ? shieldCap(Math.min(maxTools / 3, desiredToolCount)) : Math.min(maxTools / 3, desiredToolCount))
++                            })
++                        }
+ 
+                         let maxTroops = maxTroopFlank
+ 
+-                        wave.L.U.forEach(unitSlot =>
+-                            maxTroops -= assignUnit(unitSlot, attackerRangeTroops.length <= 0 ?
+-                                attackerMeleeTroops : attackerRangeTroops, maxTroops))
+-                        maxTroops = maxTroopFlank
+-                        wave.R.U.forEach(unitSlot =>
+-                            maxTroops -= assignUnit(unitSlot, attackerRangeTroops.length <= 0 ?
+-                                attackerMeleeTroops : attackerRangeTroops, maxTroops))
+-                        maxTroops = maxTroopFront
+-                        wave.M.U.forEach(unitSlot =>
+-                            maxTroops -= assignUnit(unitSlot, attackerRangeTroops.length <= 0 ?
+-                                attackerMeleeTroops : attackerRangeTroops, maxTroops))
++                        if (autoConfigure || pluginOptions.attackLeft) {
++                            wave.L.U.forEach(unitSlot =>
++                                maxTroops -= assignUnit(unitSlot, attackerRangeTroops.length <= 0 ?
++                                    attackerMeleeTroops : attackerRangeTroops, maxTroops))
++                        }
++                        if (autoConfigure || pluginOptions.attackRight) {
++                            maxTroops = maxTroopFlank
++                            wave.R.U.forEach(unitSlot =>
++                                maxTroops -= assignUnit(unitSlot, attackerRangeTroops.length <= 0 ?
++                                    attackerMeleeTroops : attackerRangeTroops, maxTroops))
++                        }
++                        if (autoConfigure || pluginOptions.attackMiddle) {
++                            maxTroops = maxTroopFront
++                            wave.M.U.forEach(unitSlot =>
++                                maxTroops -= assignUnit(unitSlot, attackerRangeTroops.length <= 0 ?
++                                    attackerMeleeTroops : attackerRangeTroops, maxTroops))
++                        }
+                         attackerMeleeTroops.sort((a, b) => Number(a.unitInfo.meleeAttack) - Number(b.unitInfo.meleeAttack))
+                         attackerRangeTroops.sort((a, b) => Number(a.unitInfo.rangeAttack) - Number(b.unitInfo.rangeAttack))
+                         return
+@@ -337,31 +393,44 @@ events.on("eventStart", async eventInfo => {
+                             return tools
+                         }
+ 
+-                        wave.L.T.forEach(unitSlot =>
+-                            maxTools -= assignUnit(unitSlot, selectTool(0), maxTools))
+-                        maxTools = maxToolsFlank
+-                        wave.R.T.forEach(unitSlot =>
+-                            maxTools -= assignUnit(unitSlot, selectTool(1), maxTools))
+-                        maxTools = maxToolsFront
+-                        wave.M.T.forEach(unitSlot =>
+-                            maxTools -= assignUnit(unitSlot, selectTool(2), maxTools))
++                        if (autoConfigure || pluginOptions.attackLeft) {
++                            maxTools = maxToolsFlank
++                            wave.L.T.forEach(unitSlot =>
++                                maxTools -= assignUnit(unitSlot, selectTool(0), maxTools))
++                        }
++                        if (autoConfigure || pluginOptions.attackRight) {
++                            maxTools = maxToolsFlank
++                            wave.R.T.forEach(unitSlot =>
++                                maxTools -= assignUnit(unitSlot, selectTool(1), maxTools))
++                        }
++                        if (autoConfigure || pluginOptions.attackMiddle) {
++                            maxTools = maxToolsFront
++                            wave.M.T.forEach(unitSlot =>
++                                maxTools -= assignUnit(unitSlot, selectTool(2), maxTools))
++                        }
+                     }
+ 
+                     let maxTroops = maxTroopFlank
+ 
+-                    wave.L.U.forEach(unitSlot =>
+-                        maxTroops -= assignUnit(unitSlot, attackerMeleeTroops.length <= 0 ?
+-                            attackerRangeTroops : attackerMeleeTroops, maxTroops))
+-                    maxTroops = maxTroopFlank
+-                    wave.R.U.forEach(unitSlot =>
+-                        maxTroops -= assignUnit(unitSlot, attackerMeleeTroops.length <= 0 ?
+-                            attackerRangeTroops : attackerMeleeTroops, maxTroops))
+-                    maxTroops = maxTroopFront
+-                    wave.M.U.forEach(unitSlot =>
+-                        maxTroops -= assignUnit(unitSlot, attackerRangeTroops.length <= 0 ?
+-                            attackerMeleeTroops : attackerRangeTroops, maxTroops))
++                    if (autoConfigure || pluginOptions.attackLeft) {
++                        wave.L.U.forEach(unitSlot =>
++                            maxTroops -= assignUnit(unitSlot, attackerMeleeTroops.length <= 0 ?
++                                attackerRangeTroops : attackerMeleeTroops, maxTroops))
++                    }
++                    if (autoConfigure || pluginOptions.attackRight) {
++                        maxTroops = maxTroopFlank
++                        wave.R.U.forEach(unitSlot =>
++                            maxTroops -= assignUnit(unitSlot, attackerMeleeTroops.length <= 0 ?
++                                attackerRangeTroops : attackerMeleeTroops, maxTroops))
++                    }
++                    if (autoConfigure || pluginOptions.attackMiddle) {
++                        maxTroops = maxTroopFront
++                        wave.M.U.forEach(unitSlot =>
++                            maxTroops -= assignUnit(unitSlot, attackerRangeTroops.length <= 0 ?
++                                attackerMeleeTroops : attackerRangeTroops, maxTroops))
++                    }
+                 })
+-                let maxTroops = getMaxUnitsInReinforcementWave(playerInfo.level, level) + Number(0 | commanderStats.attackUnitAmountReinforcementBonus)
++                let maxTroops = configCy || (getMaxUnitsInReinforcementWave(playerInfo.level, level) + Number(0 | commanderStats.attackUnitAmountReinforcementBonus))
+                 attackInfo.RW.forEach((unitSlot, i) => {
+                     let attacker = i & 1 ?
+                         (attackerMeleeTroops.length > 0 ? attackerMeleeTroops : attackerRangeTroops) :
+diff --git a/plugins/attack/attackSamurai.js b/plugins/attack/attackSamurai.js
+index 8253bb6..9c2aafb 100644
+--- a/plugins/attack/attackSamurai.js
++++ b/plugins/attack/attackSamurai.js
+@@ -21,9 +21,13 @@ if (require('node:worker_threads').isMainThread)
+                 default: "4"
+             },
+             {
+-                type: "Text",
+-                key: "commanderWhiteList",
+-                default: "1-99"
++                type: "Checkbox",
++                key: "eventWallToolsFirst"
++            },
++            {
++                type: "Checkbox",
++                key: "skipWallGateTools",
++                default: false
+             },
+             {
+                 type: "Checkbox",
+@@ -45,14 +49,45 @@ if (require('node:worker_threads').isMainThread)
+                 key: "useCoin",
+                 default: false
+             },
++            {
++                type: "Checkbox",
++                key: "useFood",
++                default: true
++            },
+             {
+                 type: "Checkbox",
+                 key: "foodTroopsOnly",
+                 default: false
+             },
++            {
++                type: "Text",
++                key: "commanderWhiteList",
++                default: "1-99"
++            },
++            {
++                type: "Text",
++                key: "commanderTroopConfig",
++                default: ""
++            },
+             {
+                 type: "Text",
+                 key: "scoreShutoff"
++            },
++            { type: "Label", key: "attackSettings" },
++            {
++                type: "Checkbox",
++                key: "attackLeft",
++                default: false
++            },
++            {
++                type: "Checkbox",
++                key: "attackMiddle",
++                default: false
++            },
++            {
++                type: "Checkbox",
++                key: "attackRight",
++                default: false
+             }
+         ]
+ 
+@@ -212,8 +247,10 @@ events.on("eventStart", async eventInfo => {
+                         else if (unit.unitInfo.defRangeBonus)
+                             attackerShieldTools.push(unit)
+                     }
+-                    else if (unit.unitInfo.fightType == 0) {
+-                        if(pluginOptions.foodTroopsOnly && unit.unitInfo.meadSupply)
++                    else if (unit.unitInfo.fightType == 0 && !unit.unitInfo.beefSupply) {
++                        if (pluginOptions.foodTroopsOnly && unit.unitInfo.meadSupply)
++                            continue
++                        if (unit.unitInfo.foodSupply && !pluginOptions.useFood)
+                             continue
+                         if (unit.unitInfo.role == "melee")
+                             attackerMeleeTroops.push(unit)
+@@ -256,51 +293,80 @@ events.on("eventStart", async eventInfo => {
+                 attackerShieldSamuraiTools.push(...attackerShieldTools)
+ 
+                 const commanderStats = commander.getEffects()
++                const commSlot = commander.lordPosition + 1
++                const configEntry = String(pluginOptions.commanderTroopConfig || "").split(",").map(e => e.trim()).find(e => e.startsWith(commSlot + ":"))
++                const [, configFront, configCy] = configEntry?.split(":").map(Number) ?? []
++                console.log(`commanderSlot ${commSlot} (${commander.name}) - front: ${configFront ?? "formula"}, courtyard: ${configCy ?? "formula"}`)
+                 const attackInfo = getAttackInfo(kingdomID, castle, areaInfo, commander, level, undefined, pluginOptions, commanderStats.additionalWaves)
+                 const maxToolsFlank = getTotalAmountToolsFlank(level, 0)
+                 const maxToolsFront = getTotalAmountToolsFront(level)
+-                const maxTroopFront = getAmountSoldiersFront(level, commanderStats.attackUnitAmountFront)
++                const maxTroopFront = configFront || getAmountSoldiersFront(level, commanderStats.attackUnitAmountFront)
+                 const maxTroopFlank = getAmountSoldiersFlank(level, commanderStats.attackUnitAmountFlank)
+-                const desiredToolCount = attackerSamuraiTools.length == 0 || !attackerSamuraiTools[0]?.unitInfo?.samuraiTokenBooster ? 20 : 10
++                const desiredToolCount = 10
++                const autoConfigure = !(pluginOptions.attackLeft || pluginOptions.attackRight || pluginOptions.attackMiddle)
+ 
+                 attackInfo.A.forEach((wave, index) => {
+                     let maxTools = maxToolsFlank
+                     if (index == 0) {
+-                        wave.L.T.forEach((unitSlot, i) =>
+-                            maxTools -= assignUnit(unitSlot, i == 0 ?
+-                                attackerWallSamuraiTools : attackerShieldSamuraiTools, Math.min(maxTools, desiredToolCount)))
++                        const shieldCap = (fallbackCap) =>
++                            attackerShieldSamuraiTools[0]?.unitInfo?.samuraiTokenBooster ? 5 : fallbackCap
++
++                        if (autoConfigure || pluginOptions.attackLeft) {
++                            maxTools = maxToolsFlank
++                            wave.L.T.forEach((unitSlot, i) => {
++                                if (pluginOptions.skipWallGateTools && i == 0) return
++                                maxTools -= assignUnit(unitSlot, i == 0 ?
++                                    attackerWallSamuraiTools : attackerShieldSamuraiTools,
++                                    i == 0 ? Math.min(maxTools / 2, desiredToolCount) : shieldCap(Math.min(maxTools / 2, desiredToolCount)))
++                            })
++                        }
+ 
+-                        maxTools = maxToolsFlank
+-                        wave.R.T.forEach((unitSlot, i) =>
+-                            maxTools -= assignUnit(unitSlot, i == 0 ?
+-                                attackerWallSamuraiTools : attackerShieldSamuraiTools, Math.min(maxTools, desiredToolCount)))
++                        if (autoConfigure || pluginOptions.attackRight) {
++                            maxTools = maxToolsFlank
++                            wave.R.T.forEach((unitSlot, i) => {
++                                if (pluginOptions.skipWallGateTools && i == 0) return
++                                maxTools -= assignUnit(unitSlot, i == 0 ?
++                                    attackerWallSamuraiTools : attackerShieldSamuraiTools,
++                                    i == 0 ? Math.min(maxTools / 2, desiredToolCount) : shieldCap(Math.min(maxTools / 2, desiredToolCount)))
++                            })
++                        }
+ 
+-                        maxTools = maxToolsFront
+-                        wave.M.T.forEach((unitSlot, i) =>
+-                            maxTools -= assignUnit(unitSlot, i == 0 ? attackerWallSamuraiTools :
+-                                i == 1 ? attackerGateSamuraiTools : attackerShieldSamuraiTools, Math.min(maxTools, desiredToolCount)))
++                        if (autoConfigure || pluginOptions.attackMiddle) {
++                            maxTools = maxToolsFront
++                            wave.M.T.forEach((unitSlot, i) => {
++                                if (pluginOptions.skipWallGateTools && i <= 1) return
++                                maxTools -= assignUnit(unitSlot, i == 0 ? attackerWallSamuraiTools :
++                                    i == 1 ? attackerGateSamuraiTools : attackerShieldSamuraiTools,
++                                    i == 2 ? shieldCap(Math.min(maxTools / 3, desiredToolCount)) : Math.min(maxTools / 3, desiredToolCount))
++                            })
++                        }
+ 
+                         let maxTroops = maxTroopFlank
+ 
+-                        wave.L.U.forEach(unitSlot =>
+-                            maxTroops -= assignUnit(unitSlot, attackerRangeTroops.length <= 0 ?
+-                                attackerMeleeTroops : attackerRangeTroops, maxTroops))
+-                        maxTroops = maxTroopFlank
+-                        wave.R.U.forEach(unitSlot =>
+-                            maxTroops -= assignUnit(unitSlot, attackerRangeTroops.length <= 0 ?
+-                                attackerMeleeTroops : attackerRangeTroops, maxTroops))
+-                        maxTroops = maxTroopFront
+-                        wave.M.U.forEach(unitSlot =>
+-                            maxTroops -= assignUnit(unitSlot, attackerRangeTroops.length <= 0 ?
+-                                attackerMeleeTroops : attackerRangeTroops, maxTroops))
+-
++                        if (autoConfigure || pluginOptions.attackLeft) {
++                            wave.L.U.forEach(unitSlot =>
++                                maxTroops -= assignUnit(unitSlot, attackerRangeTroops.length <= 0 ?
++                                    attackerMeleeTroops : attackerRangeTroops, maxTroops))
++                        }
++                        if (autoConfigure || pluginOptions.attackRight) {
++                            maxTroops = maxTroopFlank
++                            wave.R.U.forEach(unitSlot =>
++                                maxTroops -= assignUnit(unitSlot, attackerRangeTroops.length <= 0 ?
++                                    attackerMeleeTroops : attackerRangeTroops, maxTroops))
++                        }
++                        if (autoConfigure || pluginOptions.attackMiddle) {
++                            maxTroops = maxTroopFront
++                            wave.M.U.forEach(unitSlot =>
++                                maxTroops -= assignUnit(unitSlot, attackerRangeTroops.length <= 0 ?
++                                    attackerMeleeTroops : attackerRangeTroops, maxTroops))
++                        }
+                         attackerMeleeTroops.sort((a, b) => Number(a.unitInfo.meleeAttack) - Number(b.unitInfo.meleeAttack))
+                         attackerRangeTroops.sort((a, b) => Number(a.unitInfo.rangeAttack) - Number(b.unitInfo.rangeAttack))
+                         return
+                     }
+                     else if (!pluginOptions.noChests) {
+                         const selectTool = i => {
+-                            let tools = attackerSamuraiTools
++                            let tools = pluginOptions.eventWallToolsFirst ? [] : attackerSamuraiTools
+                             if (tools.length == 0 || !tools[0]?.unitInfo?.samuraiTokenBooster) {
+                                 if (i == 0) {
+                                     tools = attackerWallSamuraiTools
+@@ -326,31 +392,44 @@ events.on("eventStart", async eventInfo => {
+                             return tools
+                         }
+ 
+-                        wave.L.T.forEach(unitSlot =>
+-                            maxTools -= assignUnit(unitSlot, selectTool(0), maxTools))
+-                        maxTools = maxToolsFlank
+-                        wave.R.T.forEach(unitSlot =>
+-                            maxTools -= assignUnit(unitSlot, selectTool(1), maxTools))
+-                        maxTools = maxToolsFront
+-                        wave.M.T.forEach(unitSlot =>
+-                            maxTools -= assignUnit(unitSlot, selectTool(2), maxTools))
++                        if (autoConfigure || pluginOptions.attackLeft) {
++                            maxTools = maxToolsFlank
++                            wave.L.T.forEach(unitSlot =>
++                                maxTools -= assignUnit(unitSlot, selectTool(0), maxTools))
++                        }
++                        if (autoConfigure || pluginOptions.attackRight) {
++                            maxTools = maxToolsFlank
++                            wave.R.T.forEach(unitSlot =>
++                                maxTools -= assignUnit(unitSlot, selectTool(1), maxTools))
++                        }
++                        if (autoConfigure || pluginOptions.attackMiddle) {
++                            maxTools = maxToolsFront
++                            wave.M.T.forEach(unitSlot =>
++                                maxTools -= assignUnit(unitSlot, selectTool(2), maxTools))
++                        }
+                     }
+ 
+                     let maxTroops = maxTroopFlank
+ 
+-                    wave.L.U.forEach(unitSlot =>
+-                        maxTroops -= assignUnit(unitSlot, attackerMeleeTroops.length <= 0 ?
+-                            attackerRangeTroops : attackerMeleeTroops, maxTroops))
+-                    maxTroops = maxTroopFlank
+-                    wave.R.U.forEach(unitSlot =>
+-                        maxTroops -= assignUnit(unitSlot, attackerMeleeTroops.length <= 0 ?
+-                            attackerRangeTroops : attackerMeleeTroops, maxTroops))
+-                    maxTroops = maxTroopFront
+-                    wave.M.U.forEach(unitSlot =>
+-                        maxTroops -= assignUnit(unitSlot, attackerRangeTroops.length <= 0 ?
+-                            attackerMeleeTroops : attackerRangeTroops, maxTroops))
++                    if (autoConfigure || pluginOptions.attackLeft) {
++                        wave.L.U.forEach(unitSlot =>
++                            maxTroops -= assignUnit(unitSlot, attackerMeleeTroops.length <= 0 ?
++                                attackerRangeTroops : attackerMeleeTroops, maxTroops))
++                    }
++                    if (autoConfigure || pluginOptions.attackRight) {
++                        maxTroops = maxTroopFlank
++                        wave.R.U.forEach(unitSlot =>
++                            maxTroops -= assignUnit(unitSlot, attackerMeleeTroops.length <= 0 ?
++                                attackerRangeTroops : attackerMeleeTroops, maxTroops))
++                    }
++                    if (autoConfigure || pluginOptions.attackMiddle) {
++                        maxTroops = maxTroopFront
++                        wave.M.U.forEach(unitSlot =>
++                            maxTroops -= assignUnit(unitSlot, attackerRangeTroops.length <= 0 ?
++                                attackerMeleeTroops : attackerRangeTroops, maxTroops))
++                    }
+                 })
+-                let maxTroops = getMaxUnitsInReinforcementWave(playerInfo.level, level) + Number(0 | commanderStats.attackUnitAmountReinforcementBonus)
++                let maxTroops = configCy || (getMaxUnitsInReinforcementWave(playerInfo.level, level) + Number(0 | commanderStats.attackUnitAmountReinforcementBonus))
+                 attackInfo.RW.forEach((unitSlot, i) => {
+                     let attacker = i & 1 ?
+                         (attackerMeleeTroops.length > 0 ? attackerMeleeTroops : attackerRangeTroops) :
+diff --git a/plugins/feast.js b/plugins/feast.js
+index 43427d2..b683cef 100644
+--- a/plugins/feast.js
++++ b/plugins/feast.js
+@@ -59,6 +59,6 @@ const tryToFeast = async () => {
+ }
+ 
+ events.once("load", () => {
+-    setInterval(tryToFeast, 1000 * 60 * 8)
++    setInterval(tryToFeast, 1000 * 60 * 2)
+     tryToFeast()
+ })
+\ No newline at end of file
+diff --git a/plugins/misc.js b/plugins/misc.js
+index 6f5a355..ce9d35e 100644
+--- a/plugins/misc.js
++++ b/plugins/misc.js
+@@ -6,7 +6,7 @@ if (require('node:worker_threads').isMainThread) {
+     }
+ }
+ 
+-const { xtHandler, sendXT, events, playerInfo} = require("../ggeBot")
++const { xtHandler, sendXT, events } = require("../ggeBot")
+ 
+ const quests = [3000, 3002, 3019, 3490, 84, 186, 30]
+ const messageIds = [67]
+@@ -20,17 +20,6 @@ xtHandler.on("qli", obj => obj.QL?.forEach(({ QID }) => {
+     if(quests.includes(QID))
+         sendXT("qsc", JSON.stringify({ QID }))
+ }))
+-events.on("eventStart", eventInfo => {
+-    if (eventInfo.EID != 117)
+-        return
+-    if (eventInfo.FTDC != 1)
+-        return
+-    if (playerInfo.rubies < 100)
+-        return
+-
+-    console.log("grabbedFortuneTellerFortune")
+-    sendXT("ftl", JSON.stringify({}))
+-})
+ 
+ // xtHandler.on("gcs", obj => {
+ //     obj.CHR.forEach(offering => {
+diff --git a/plugins/skips.js b/plugins/skips.js
+index d407aca..9aa1745 100644
+--- a/plugins/skips.js
++++ b/plugins/skips.js
+@@ -61,57 +61,77 @@ const MinuteSkipType = Object.freeze({
+ 
+ const pluginOptions = botConfig.plugins[require("path").basename(__filename).slice(0, -3)] ?? {}
+ 
++// Skip type -> [checkbox key, resources key]
++const skipSources = Object.freeze({
++    MS1: ["1Minute", "1MinSkip"],
++    MS2: ["5Minute", "5MinSkip"],
++    MS3: ["10Minute", "10MinSkip"],
++    MS4: ["30Minute", "30MinSkip"],
++    MS5: ["1Hour", "60MinSkip"],
++    MS6: ["5Hour", "5HourSkip"],
++    MS7: ["24Hour", "24HourSkip"]
++})
++
++// Counts of every ticked skip type; unticked or unknown (NaN) counts as 0
++const getSkipCounts = () => Object.fromEntries(Object.entries(skipSources)
++    .map(([skip, [option, resource]]) =>
++        [skip, pluginOptions[option] && resources[resource] > 0 ? resources[resource] : 0]))
++
++/**
++ * Picks the next skip for `minutes` remaining, aiming for few requests and little waste:
++ * 1. one skip that finishes it, wasting at most max(2 min, 10%) -> use the smallest such
++ * 2. otherwise the largest skip that doesn't overshoot (no waste), then repeat
++ * 3. if every available skip overshoots, the smallest one, but only up to 4x the
++ *    remaining time unless bypassSkipTypeFilter is set
++ */
++function pickSkip(counts, minutes) {
++    const available = Object.keys(counts)
++        .filter(skip => counts[skip] > 0)
++        .sort((a, b) => MinuteSkipType[a] - MinuteSkipType[b])
++    const tolerance = Math.max(2, minutes * 0.1)
++
++    const finisher = available.find(skip =>
++        MinuteSkipType[skip] >= minutes && MinuteSkipType[skip] - minutes <= tolerance)
++    if (finisher)
++        return finisher
++
++    const fitting = available.filter(skip => MinuteSkipType[skip] <= minutes).at(-1)
++    if (fitting)
++        return fitting
++
++    return available.find(skip =>
++        pluginOptions.bypassSkipTypeFilter || MinuteSkipType[skip] <= minutes * 4)
++}
++
+ function haveEnoughSkips(time) {
+-    const skips = {
+-        MS1: pluginOptions["1Minute"] ? structuredClone(resources['1MinSkip']) : 0,
+-        MS2: pluginOptions["5Minute"] ? structuredClone(resources['5MinSkip']) : 0,
+-        MS3: pluginOptions["10Minute"] ? structuredClone(resources['10MinSkip']) : 0,
+-        MS4: pluginOptions["30Minute"] ? structuredClone(resources['30MinSkip']) : 0,
+-        MS5: pluginOptions["1Hour"] ? structuredClone(resources['60MinSkip']) : 0,
+-        MS6: pluginOptions["5Hour"] ? structuredClone(resources['5HourSkip']) : 0,
+-        MS7: pluginOptions["24Hour"] ? structuredClone(resources['24HourSkip']) : 0
+-    }
+-    time = Math.ceil(time / 60)
+-    
+-    while (time > 0) {
+-        const skip = Object.entries(skips)
+-            .filter(e => e[1] > 0)
+-            .filter(e => pluginOptions.bypassSkipTypeFilter || MinuteSkipType[e[0]] <= time * 4)
+-            .sort((a, b) => (time > MinuteSkipType[a[0]]) - (time > MinuteSkipType[b[0]]))
+-            .sort((a, b) => Math.min(Math.max(b[1], 950), 951) - Math.min(Math.max(a[1], 950), 951))
+-
+-        if (skip[0] == undefined)
++    const counts = getSkipCounts()
++    let minutes = Math.ceil(time / 60)
++
++    while (minutes > 0) {
++        const skip = pickSkip(counts, minutes)
++        if (skip == undefined)
+             return false
+ 
+-        skips[skip[0][0]]--
+-        time -= MinuteSkipType[skip[0][0]]
++        counts[skip]--
++        minutes -= MinuteSkipType[skip]
+     }
+-    return true 
++    return true
+ }
+ 
+ function spendSkip(time) {
+-    const skips = {
+-        MS1: pluginOptions["1Minute"] ? resources['1MinSkip'] : 0,
+-        MS2: pluginOptions["5Minute"] ? resources['5MinSkip'] : 0,
+-        MS3: pluginOptions["10Minute"] ? resources['10MinSkip'] : 0,
+-        MS4: pluginOptions["30Minute"] ? resources['30MinSkip'] : 0,
+-        MS5: pluginOptions["1Hour"] ? resources['60MinSkip'] : 0,
+-        MS6: pluginOptions["5Hour"] ? resources['5HourSkip'] : 0,
+-        MS7: pluginOptions["24Hour"] ? resources['24HourSkip'] : 0
++    const minutes = Math.ceil(time / 60)
++    const skip = minutes > 0 ? pickSkip(getSkipCounts(), minutes) : undefined
++    if (skip == undefined) {
++        console.warn("noMoreSkips")
++        return undefined
+     }
+-    time = Math.ceil(time / 60)
+-    const skip = Object.entries(skips)
+-        .filter(e => e[1] > 0)
+-        .filter(e => pluginOptions.bypassSkipTypeFilter || MinuteSkipType[e[0]] <= time * 4)
+-        .sort((a, b) => (time > MinuteSkipType[a[0]]) - (time > MinuteSkipType[b[0]]))
+-        .sort((a, b) => Math.min(Math.max(b[1], 950), 951) - Math.min(Math.max(a[1], 950), 951))
+ 
+-    if (skip[0] == undefined)
+-        return console.warn("noMoreSkips")
++    // The server's count update may lag behind, so don't offer a type we've just used up
++    resources[skipSources[skip][1]]--
+ 
+-    console.debug("usingSkip", skip[0][0])
++    console.debug("usingSkip", skip)
+ 
+-    return skip[0][0]
++    return skip
+ }
+ 
+ module.exports = { spendSkip, haveEnoughSkips, MinuteSkipType }
+\ No newline at end of file
+diff --git a/protocols.js b/protocols.js
+index e3a4351..2e436e2 100644
+--- a/protocols.js
++++ b/protocols.js
+@@ -398,7 +398,7 @@ const GetProductionData = e => ({
+ 
+     safeFood: Number(e.SAFE_F),
+     safeStone: Number(e.SAFE_S),
+-    safeWood: Number(e.SAFE_F),
++    safeWood: Number(e.SAFE_W),
+     safeCoal: Number(e.SAFE_C),
+     safeIron: Number(e.SAFE_I),
+     safeOil: Number(e.SAFE_O),
+@@ -469,6 +469,12 @@ const clientSkipResourceTransfer = async (skipType, kingdomID, kingdomSkipType)
+     return result
+ }
+ 
++async function clientKingdomTroopTransfer(sourceAreaID, sourceKingdomID, targetKingdomID, units) {
++    await sendXT("kut", JSON.stringify({ SCID: sourceAreaID, SKID: sourceKingdomID, TKID: targetKingdomID, CID: -1, A: units }))
++    const [, result] = await waitForResult("kut", 1000 * 10)
++    return result
++}
++
+ //TODO: May Conflict with other clientskipUnitTransfer
+ async function clientKingdomUnitTransfer(sourceAreaID, sourceKingdomID, targetKingdomID, resources) {
+     await sendXT("kgt", JSON.stringify({ SCID: sourceAreaID, SKID: sourceKingdomID, TKID: targetKingdomID, G: resources }))
+@@ -658,7 +664,10 @@ xtHandler.on("hru", (obj, r) => {
+     if(!currentCastle)
+         return
+ 
+-    Object.assign(currentCastle.unitInventory, new UnitInventory(obj.gui))
++    // UnitInventory carries unitInventory/strongHoldInventory/... keys, which
++    // belong on the castle itself (assigning onto the array was a no-op).
++    if(obj.gui)
++        Object.assign(currentCastle, new UnitInventory(obj.gui))
+     
+     if(obj.gcu)
+         xtHandler.emit("gcu", obj.gcu)
+@@ -764,6 +773,7 @@ function skipUnitTransferList(obj, result)  {
+ xtHandler.on("kpi", skipUnitTransferList)
+ xtHandler.on("fjf", (obj, result) => skipUnitTransferList(obj?.kpi, result))
+ xtHandler.on("kgt", (obj, result) => skipUnitTransferList(obj?.kpi, result))
++xtHandler.on("kut", (obj, result) => skipUnitTransferList(obj?.kpi, result))
+ xtHandler.on("msk", (obj, result) => {
+     skipUnitTransferList(obj?.kpi, result)
+ })
+@@ -1276,7 +1286,8 @@ movementEvents.on("return", async (/** @type {Movement} */ movement) => {
+ 
+     const castle = castles.find(castle => castle.kingdomID == movement.kingdomID && castle.id == movement.targetAttack.extraData[0])
+     if(!castle)
+-        debugger
++        return
++    castle.unitInventory ??= []
+     movement.station.forEach(unit => {
+         const unitInInventory = castle.unitInventory.find(e => e.unitInfo.wodID == unit.unitInfo.wodID)
+         if(unitInInventory)
+@@ -1403,7 +1414,11 @@ let setCastle = (castle, callback) => new Promise(async (resolve, reject) => {
+             // if(undefined == castle)
+                 // console.log("Prevented changing on map data")
+ 
+-            currentCastle = castle
++            // undefined means "any castle is fine" (e.g. map data requests), so it
++            // must not clear the joined castle; clearing it forced a fresh jca
++            // kingdom switch before every following castle-bound command.
++            if (castle)
++                currentCastle = castle
+             resolve(await callback())
+         }
+         catch (e) {
+@@ -1429,6 +1444,13 @@ let setCastle = (castle, callback) => new Promise(async (resolve, reject) => {
+     kingdomInUse = false
+ })
+ 
++async function clientRecruitUnit(areaID, wodID, amount, slotID, lordID) {
++    await sendXT("bup", JSON.stringify({ LID: lordID ?? 0, WID: wodID, AMT: amount, PO: -1, PWR: 0, SK: 73, SID: slotID, AID: areaID }))
++
++    const [, result] = await waitForResult("bup", 1000 * 10)
++    return result
++}
++
+ module.exports = {
+     spiralCoordinates,
+     setCastle,
+@@ -1446,6 +1468,7 @@ module.exports = {
+         startFeast: clientStartFeast,
+         getStormIslandInfo: clientGetStormIslandInfo,
+         kingdomUnitTransfer: clientKingdomUnitTransfer,
++        kingdomTroopTransfer: clientKingdomTroopTransfer,
+         skipResourceTransfer: clientSkipResourceTransfer,
+         activeQuestList: clientActiveQuestList,
+         joinArea: clientJoinArea,
+@@ -1453,7 +1476,8 @@ module.exports = {
+         allianceQuestPointCount: clientAllianceQuestPointCount,
+         getAllianceByID: clientGetAllianceByID,
+         getAllianceByName : clientGetAllianceByName,
+-        joinCastle: clientJoinCastle
++        joinCastle: clientJoinCastle,
++        recruitUnit: clientRecruitUnit
+     },
+     ClassTypes: {
+         UnitInventory,

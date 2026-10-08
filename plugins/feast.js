@@ -59,6 +59,6 @@ const tryToFeast = async () => {
 }
 
 events.once("load", () => {
-    setInterval(tryToFeast, 1000 * 60 * 8)
+    setInterval(tryToFeast, 1000 * 60 * 2)
     tryToFeast()
 })

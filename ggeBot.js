@@ -87,7 +87,7 @@ const waitForResult = (key, timeout, func) => new Promise((resolve, reject) => {
     let timer
     let result
     const checkForIssues = () => {
-        if (["LORD_IS_USED", "ATTACK_TOO_MANY_UNITS", "ATTACK_TOO_MANY_UNITS", "MISSING_UNITS"].includes(err[result]))
+        if (["LORD_IS_USED", "ATTACK_TOO_MANY_UNITS", "ATTACK_TOO_MANY_UNITS"].includes(err[result]))
             importantErrors++
         if (importantErrors == 8) {
             console.error("closedReason", "tooManyImportantErrors")
@@ -132,6 +132,12 @@ const waitForResult = (key, timeout, func) => new Promise((resolve, reject) => {
             return
         if(_result != 0)
             console.warn(key, msg)
+        else {
+            // Count consecutive failures, not lifetime ones: otherwise a long
+            // session eventually pauses the socket or exits on scattered errors.
+            timedOut = 0
+            importantErrors = 0
+        }
 
         xtHandler.removeListener(key, helperFunction)
         clearInterval(timer)

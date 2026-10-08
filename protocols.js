@@ -398,7 +398,7 @@ const GetProductionData = e => ({
 
     safeFood: Number(e.SAFE_F),
     safeStone: Number(e.SAFE_S),
-    safeWood: Number(e.SAFE_F),
+    safeWood: Number(e.SAFE_W),
     safeCoal: Number(e.SAFE_C),
     safeIron: Number(e.SAFE_I),
     safeOil: Number(e.SAFE_O),
@@ -466,6 +466,12 @@ const KingdomInfo = e => ({ //KPI
 const clientSkipResourceTransfer = async (skipType, kingdomID, kingdomSkipType) => {
     await sendXT("msk", JSON.stringify({ MST: skipType, KID: `${kingdomID}`, TT: `${kingdomSkipType}` }))
     const [, result] = await waitForResult("msk", 1000 * 10)
+    return result
+}
+
+async function clientKingdomTroopTransfer(sourceAreaID, sourceKingdomID, targetKingdomID, units) {
+    await sendXT("kut", JSON.stringify({ SCID: sourceAreaID, SKID: sourceKingdomID, TKID: targetKingdomID, CID: -1, A: units }))
+    const [, result] = await waitForResult("kut", 1000 * 10)
     return result
 }
 
@@ -658,7 +664,10 @@ xtHandler.on("hru", (obj, r) => {
     if(!currentCastle)
         return
 
-    Object.assign(currentCastle.unitInventory, new UnitInventory(obj.gui))
+    // UnitInventory carries unitInventory/strongHoldInventory/... keys, which
+    // belong on the castle itself (assigning onto the array was a no-op).
+    if(obj.gui)
+        Object.assign(currentCastle, new UnitInventory(obj.gui))
     
     if(obj.gcu)
         xtHandler.emit("gcu", obj.gcu)
@@ -764,6 +773,7 @@ function skipUnitTransferList(obj, result)  {
 xtHandler.on("kpi", skipUnitTransferList)
 xtHandler.on("fjf", (obj, result) => skipUnitTransferList(obj?.kpi, result))
 xtHandler.on("kgt", (obj, result) => skipUnitTransferList(obj?.kpi, result))
+xtHandler.on("kut", (obj, result) => skipUnitTransferList(obj?.kpi, result))
 xtHandler.on("msk", (obj, result) => {
     skipUnitTransferList(obj?.kpi, result)
 })
@@ -1276,7 +1286,8 @@ movementEvents.on("return", async (/** @type {Movement} */ movement) => {
 
     const castle = castles.find(castle => castle.kingdomID == movement.kingdomID && castle.id == movement.targetAttack.extraData[0])
     if(!castle)
-        debugger
+        return
+    castle.unitInventory ??= []
     movement.station.forEach(unit => {
         const unitInInventory = castle.unitInventory.find(e => e.unitInfo.wodID == unit.unitInfo.wodID)
         if(unitInInventory)
@@ -1403,7 +1414,11 @@ let setCastle = (castle, callback) => new Promise(async (resolve, reject) => {
             // if(undefined == castle)
                 // console.log("Prevented changing on map data")
 
-            currentCastle = castle
+            // undefined means "any castle is fine" (e.g. map data requests), so it
+            // must not clear the joined castle; clearing it forced a fresh jca
+            // kingdom switch before every following castle-bound command.
+            if (castle)
+                currentCastle = castle
             resolve(await callback())
         }
         catch (e) {
@@ -1429,6 +1444,13 @@ let setCastle = (castle, callback) => new Promise(async (resolve, reject) => {
     kingdomInUse = false
 })
 
+async function clientRecruitUnit(areaID, wodID, amount, slotID, lordID) {
+    await sendXT("bup", JSON.stringify({ LID: lordID ?? 0, WID: wodID, AMT: amount, PO: -1, PWR: 0, SK: 73, SID: slotID, AID: areaID }))
+
+    const [, result] = await waitForResult("bup", 1000 * 10)
+    return result
+}
+
 module.exports = {
     spiralCoordinates,
     setCastle,
@@ -1446,6 +1468,7 @@ module.exports = {
         startFeast: clientStartFeast,
         getStormIslandInfo: clientGetStormIslandInfo,
         kingdomUnitTransfer: clientKingdomUnitTransfer,
+        kingdomTroopTransfer: clientKingdomTroopTransfer,
         skipResourceTransfer: clientSkipResourceTransfer,
         activeQuestList: clientActiveQuestList,
         joinArea: clientJoinArea,
@@ -1453,7 +1476,8 @@ module.exports = {
         allianceQuestPointCount: clientAllianceQuestPointCount,
         getAllianceByID: clientGetAllianceByID,
         getAllianceByName : clientGetAllianceByName,
-        joinCastle: clientJoinCastle
+        joinCastle: clientJoinCastle,
+        recruitUnit: clientRecruitUnit
     },
     ClassTypes: {
         UnitInventory,

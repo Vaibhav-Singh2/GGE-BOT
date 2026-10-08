@@ -61,57 +61,77 @@ const MinuteSkipType = Object.freeze({
 
 const pluginOptions = botConfig.plugins[require("path").basename(__filename).slice(0, -3)] ?? {}
 
-function haveEnoughSkips(time) {
-    const skips = {
-        MS1: pluginOptions["1Minute"] ? structuredClone(resources['1MinSkip']) : 0,
-        MS2: pluginOptions["5Minute"] ? structuredClone(resources['5MinSkip']) : 0,
-        MS3: pluginOptions["10Minute"] ? structuredClone(resources['10MinSkip']) : 0,
-        MS4: pluginOptions["30Minute"] ? structuredClone(resources['30MinSkip']) : 0,
-        MS5: pluginOptions["1Hour"] ? structuredClone(resources['60MinSkip']) : 0,
-        MS6: pluginOptions["5Hour"] ? structuredClone(resources['5HourSkip']) : 0,
-        MS7: pluginOptions["24Hour"] ? structuredClone(resources['24HourSkip']) : 0
-    }
-    time = Math.ceil(time / 60)
-    
-    while (time > 0) {
-        const skip = Object.entries(skips)
-            .filter(e => e[1] > 0)
-            .filter(e => pluginOptions.bypassSkipTypeFilter || MinuteSkipType[e[0]] <= time * 4)
-            .sort((a, b) => (time > MinuteSkipType[a[0]]) - (time > MinuteSkipType[b[0]]))
-            .sort((a, b) => Math.min(Math.max(b[1], 950), 951) - Math.min(Math.max(a[1], 950), 951))
+// Skip type -> [checkbox key, resources key]
+const skipSources = Object.freeze({
+    MS1: ["1Minute", "1MinSkip"],
+    MS2: ["5Minute", "5MinSkip"],
+    MS3: ["10Minute", "10MinSkip"],
+    MS4: ["30Minute", "30MinSkip"],
+    MS5: ["1Hour", "60MinSkip"],
+    MS6: ["5Hour", "5HourSkip"],
+    MS7: ["24Hour", "24HourSkip"]
+})
 
-        if (skip[0] == undefined)
+// Counts of every ticked skip type; unticked or unknown (NaN) counts as 0
+const getSkipCounts = () => Object.fromEntries(Object.entries(skipSources)
+    .map(([skip, [option, resource]]) =>
+        [skip, pluginOptions[option] && resources[resource] > 0 ? resources[resource] : 0]))
+
+/**
+ * Picks the next skip for `minutes` remaining, aiming for few requests and little waste:
+ * 1. one skip that finishes it, wasting at most max(2 min, 10%) -> use the smallest such
+ * 2. otherwise the largest skip that doesn't overshoot (no waste), then repeat
+ * 3. if every available skip overshoots, the smallest one, but only up to 4x the
+ *    remaining time unless bypassSkipTypeFilter is set
+ */
+function pickSkip(counts, minutes) {
+    const available = Object.keys(counts)
+        .filter(skip => counts[skip] > 0)
+        .sort((a, b) => MinuteSkipType[a] - MinuteSkipType[b])
+    const tolerance = Math.max(2, minutes * 0.1)
+
+    const finisher = available.find(skip =>
+        MinuteSkipType[skip] >= minutes && MinuteSkipType[skip] - minutes <= tolerance)
+    if (finisher)
+        return finisher
+
+    const fitting = available.filter(skip => MinuteSkipType[skip] <= minutes).at(-1)
+    if (fitting)
+        return fitting
+
+    return available.find(skip =>
+        pluginOptions.bypassSkipTypeFilter || MinuteSkipType[skip] <= minutes * 4)
+}
+
+function haveEnoughSkips(time) {
+    const counts = getSkipCounts()
+    let minutes = Math.ceil(time / 60)
+
+    while (minutes > 0) {
+        const skip = pickSkip(counts, minutes)
+        if (skip == undefined)
             return false
 
-        skips[skip[0][0]]--
-        time -= MinuteSkipType[skip[0][0]]
+        counts[skip]--
+        minutes -= MinuteSkipType[skip]
     }
-    return true 
+    return true
 }
 
 function spendSkip(time) {
-    const skips = {
-        MS1: pluginOptions["1Minute"] ? resources['1MinSkip'] : 0,
-        MS2: pluginOptions["5Minute"] ? resources['5MinSkip'] : 0,
-        MS3: pluginOptions["10Minute"] ? resources['10MinSkip'] : 0,
-        MS4: pluginOptions["30Minute"] ? resources['30MinSkip'] : 0,
-        MS5: pluginOptions["1Hour"] ? resources['60MinSkip'] : 0,
-        MS6: pluginOptions["5Hour"] ? resources['5HourSkip'] : 0,
-        MS7: pluginOptions["24Hour"] ? resources['24HourSkip'] : 0
+    const minutes = Math.ceil(time / 60)
+    const skip = minutes > 0 ? pickSkip(getSkipCounts(), minutes) : undefined
+    if (skip == undefined) {
+        console.warn("noMoreSkips")
+        return undefined
     }
-    time = Math.ceil(time / 60)
-    const skip = Object.entries(skips)
-        .filter(e => e[1] > 0)
-        .filter(e => pluginOptions.bypassSkipTypeFilter || MinuteSkipType[e[0]] <= time * 4)
-        .sort((a, b) => (time > MinuteSkipType[a[0]]) - (time > MinuteSkipType[b[0]]))
-        .sort((a, b) => Math.min(Math.max(b[1], 950), 951) - Math.min(Math.max(a[1], 950), 951))
 
-    if (skip[0] == undefined)
-        return console.warn("noMoreSkips")
+    // The server's count update may lag behind, so don't offer a type we've just used up
+    resources[skipSources[skip][1]]--
 
-    console.debug("usingSkip", skip[0][0])
+    console.debug("usingSkip", skip)
 
-    return skip[0][0]
+    return skip
 }
 
 module.exports = { spendSkip, haveEnoughSkips, MinuteSkipType }

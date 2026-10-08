@@ -6,7 +6,7 @@ if (require('node:worker_threads').isMainThread) {
     }
 }
 
-const { xtHandler, sendXT, events, playerInfo} = require("../ggeBot")
+const { xtHandler, sendXT, events } = require("../ggeBot")
 
 const quests = [3000, 3002, 3019, 3490, 84, 186, 30]
 const messageIds = [67]
@@ -20,17 +20,6 @@ xtHandler.on("qli", obj => obj.QL?.forEach(({ QID }) => {
     if(quests.includes(QID))
         sendXT("qsc", JSON.stringify({ QID }))
 }))
-events.on("eventStart", eventInfo => {
-    if (eventInfo.EID != 117)
-        return
-    if (eventInfo.FTDC != 1)
-        return
-    if (playerInfo.rubies < 100)
-        return
-
-    console.log("grabbedFortuneTellerFortune")
-    sendXT("ftl", JSON.stringify({}))
-})
 
 // xtHandler.on("gcs", obj => {
 //     obj.CHR.forEach(offering => {

@@ -21,9 +21,13 @@ if (require('node:worker_threads').isMainThread)
                 default: "4"
             },
             {
-                type: "Text",
-                key: "commanderWhiteList",
-                default: "1-99"
+                type: "Checkbox",
+                key: "eventWallToolsFirst"
+            },
+            {
+                type: "Checkbox",
+                key: "skipWallGateTools",
+                default: false
             },
             {
                 type: "Checkbox",
@@ -47,12 +51,43 @@ if (require('node:worker_threads').isMainThread)
             },
             {
                 type: "Checkbox",
+                key: "useFood",
+                default: true
+            },
+            {
+                type: "Checkbox",
                 key: "foodTroopsOnly",
                 default: false
             },
             {
                 type: "Text",
+                key: "commanderWhiteList",
+                default: "1-99"
+            },
+            {
+                type: "Text",
+                key: "commanderTroopConfig",
+                default: ""
+            },
+            {
+                type: "Text",
                 key: "scoreShutoff"
+            },
+            { type: "Label", key: "attackSettings" },
+            {
+                type: "Checkbox",
+                key: "attackLeft",
+                default: false
+            },
+            {
+                type: "Checkbox",
+                key: "attackMiddle",
+                default: false
+            },
+            {
+                type: "Checkbox",
+                key: "attackRight",
+                default: false
             }
         ]
 
@@ -212,8 +247,10 @@ events.on("eventStart", async eventInfo => {
                         else if (unit.unitInfo.defRangeBonus)
                             attackerShieldTools.push(unit)
                     }
-                    else if (unit.unitInfo.fightType == 0) {
-                        if(pluginOptions.foodTroopsOnly && unit.unitInfo.meadSupply)
+                    else if (unit.unitInfo.fightType == 0 && !unit.unitInfo.beefSupply) {
+                        if (pluginOptions.foodTroopsOnly && unit.unitInfo.meadSupply)
+                            continue
+                        if (unit.unitInfo.foodSupply && !pluginOptions.useFood)
                             continue
                         if (unit.unitInfo.role == "melee")
                             attackerMeleeTroops.push(unit)
@@ -256,51 +293,80 @@ events.on("eventStart", async eventInfo => {
                 attackerShieldSamuraiTools.push(...attackerShieldTools)
 
                 const commanderStats = commander.getEffects()
+                const commSlot = commander.lordPosition + 1
+                const configEntry = String(pluginOptions.commanderTroopConfig || "").split(",").map(e => e.trim()).find(e => e.startsWith(commSlot + ":"))
+                const [, configFront, configCy] = configEntry?.split(":").map(Number) ?? []
+                console.log(`commanderSlot ${commSlot} (${commander.name}) - front: ${configFront ?? "formula"}, courtyard: ${configCy ?? "formula"}`)
                 const attackInfo = getAttackInfo(kingdomID, castle, areaInfo, commander, level, undefined, pluginOptions, commanderStats.additionalWaves)
                 const maxToolsFlank = getTotalAmountToolsFlank(level, 0)
                 const maxToolsFront = getTotalAmountToolsFront(level)
-                const maxTroopFront = getAmountSoldiersFront(level, commanderStats.attackUnitAmountFront)
+                const maxTroopFront = configFront || getAmountSoldiersFront(level, commanderStats.attackUnitAmountFront)
                 const maxTroopFlank = getAmountSoldiersFlank(level, commanderStats.attackUnitAmountFlank)
-                const desiredToolCount = attackerSamuraiTools.length == 0 || !attackerSamuraiTools[0]?.unitInfo?.samuraiTokenBooster ? 20 : 10
+                const desiredToolCount = 10
+                const autoConfigure = !(pluginOptions.attackLeft || pluginOptions.attackRight || pluginOptions.attackMiddle)
 
                 attackInfo.A.forEach((wave, index) => {
                     let maxTools = maxToolsFlank
                     if (index == 0) {
-                        wave.L.T.forEach((unitSlot, i) =>
-                            maxTools -= assignUnit(unitSlot, i == 0 ?
-                                attackerWallSamuraiTools : attackerShieldSamuraiTools, Math.min(maxTools, desiredToolCount)))
+                        const shieldCap = (fallbackCap) =>
+                            attackerShieldSamuraiTools[0]?.unitInfo?.samuraiTokenBooster ? 5 : fallbackCap
 
-                        maxTools = maxToolsFlank
-                        wave.R.T.forEach((unitSlot, i) =>
-                            maxTools -= assignUnit(unitSlot, i == 0 ?
-                                attackerWallSamuraiTools : attackerShieldSamuraiTools, Math.min(maxTools, desiredToolCount)))
+                        if (autoConfigure || pluginOptions.attackLeft) {
+                            maxTools = maxToolsFlank
+                            wave.L.T.forEach((unitSlot, i) => {
+                                if (pluginOptions.skipWallGateTools && i == 0) return
+                                maxTools -= assignUnit(unitSlot, i == 0 ?
+                                    attackerWallSamuraiTools : attackerShieldSamuraiTools,
+                                    i == 0 ? Math.min(maxTools / 2, desiredToolCount) : shieldCap(Math.min(maxTools / 2, desiredToolCount)))
+                            })
+                        }
 
-                        maxTools = maxToolsFront
-                        wave.M.T.forEach((unitSlot, i) =>
-                            maxTools -= assignUnit(unitSlot, i == 0 ? attackerWallSamuraiTools :
-                                i == 1 ? attackerGateSamuraiTools : attackerShieldSamuraiTools, Math.min(maxTools, desiredToolCount)))
+                        if (autoConfigure || pluginOptions.attackRight) {
+                            maxTools = maxToolsFlank
+                            wave.R.T.forEach((unitSlot, i) => {
+                                if (pluginOptions.skipWallGateTools && i == 0) return
+                                maxTools -= assignUnit(unitSlot, i == 0 ?
+                                    attackerWallSamuraiTools : attackerShieldSamuraiTools,
+                                    i == 0 ? Math.min(maxTools / 2, desiredToolCount) : shieldCap(Math.min(maxTools / 2, desiredToolCount)))
+                            })
+                        }
+
+                        if (autoConfigure || pluginOptions.attackMiddle) {
+                            maxTools = maxToolsFront
+                            wave.M.T.forEach((unitSlot, i) => {
+                                if (pluginOptions.skipWallGateTools && i <= 1) return
+                                maxTools -= assignUnit(unitSlot, i == 0 ? attackerWallSamuraiTools :
+                                    i == 1 ? attackerGateSamuraiTools : attackerShieldSamuraiTools,
+                                    i == 2 ? shieldCap(Math.min(maxTools / 3, desiredToolCount)) : Math.min(maxTools / 3, desiredToolCount))
+                            })
+                        }
 
                         let maxTroops = maxTroopFlank
 
-                        wave.L.U.forEach(unitSlot =>
-                            maxTroops -= assignUnit(unitSlot, attackerRangeTroops.length <= 0 ?
-                                attackerMeleeTroops : attackerRangeTroops, maxTroops))
-                        maxTroops = maxTroopFlank
-                        wave.R.U.forEach(unitSlot =>
-                            maxTroops -= assignUnit(unitSlot, attackerRangeTroops.length <= 0 ?
-                                attackerMeleeTroops : attackerRangeTroops, maxTroops))
-                        maxTroops = maxTroopFront
-                        wave.M.U.forEach(unitSlot =>
-                            maxTroops -= assignUnit(unitSlot, attackerRangeTroops.length <= 0 ?
-                                attackerMeleeTroops : attackerRangeTroops, maxTroops))
-
+                        if (autoConfigure || pluginOptions.attackLeft) {
+                            wave.L.U.forEach(unitSlot =>
+                                maxTroops -= assignUnit(unitSlot, attackerRangeTroops.length <= 0 ?
+                                    attackerMeleeTroops : attackerRangeTroops, maxTroops))
+                        }
+                        if (autoConfigure || pluginOptions.attackRight) {
+                            maxTroops = maxTroopFlank
+                            wave.R.U.forEach(unitSlot =>
+                                maxTroops -= assignUnit(unitSlot, attackerRangeTroops.length <= 0 ?
+                                    attackerMeleeTroops : attackerRangeTroops, maxTroops))
+                        }
+                        if (autoConfigure || pluginOptions.attackMiddle) {
+                            maxTroops = maxTroopFront
+                            wave.M.U.forEach(unitSlot =>
+                                maxTroops -= assignUnit(unitSlot, attackerRangeTroops.length <= 0 ?
+                                    attackerMeleeTroops : attackerRangeTroops, maxTroops))
+                        }
                         attackerMeleeTroops.sort((a, b) => Number(a.unitInfo.meleeAttack) - Number(b.unitInfo.meleeAttack))
                         attackerRangeTroops.sort((a, b) => Number(a.unitInfo.rangeAttack) - Number(b.unitInfo.rangeAttack))
                         return
                     }
                     else if (!pluginOptions.noChests) {
                         const selectTool = i => {
-                            let tools = attackerSamuraiTools
+                            let tools = pluginOptions.eventWallToolsFirst ? [] : attackerSamuraiTools
                             if (tools.length == 0 || !tools[0]?.unitInfo?.samuraiTokenBooster) {
                                 if (i == 0) {
                                     tools = attackerWallSamuraiTools
@@ -326,31 +392,44 @@ events.on("eventStart", async eventInfo => {
                             return tools
                         }
 
-                        wave.L.T.forEach(unitSlot =>
-                            maxTools -= assignUnit(unitSlot, selectTool(0), maxTools))
-                        maxTools = maxToolsFlank
-                        wave.R.T.forEach(unitSlot =>
-                            maxTools -= assignUnit(unitSlot, selectTool(1), maxTools))
-                        maxTools = maxToolsFront
-                        wave.M.T.forEach(unitSlot =>
-                            maxTools -= assignUnit(unitSlot, selectTool(2), maxTools))
+                        if (autoConfigure || pluginOptions.attackLeft) {
+                            maxTools = maxToolsFlank
+                            wave.L.T.forEach(unitSlot =>
+                                maxTools -= assignUnit(unitSlot, selectTool(0), maxTools))
+                        }
+                        if (autoConfigure || pluginOptions.attackRight) {
+                            maxTools = maxToolsFlank
+                            wave.R.T.forEach(unitSlot =>
+                                maxTools -= assignUnit(unitSlot, selectTool(1), maxTools))
+                        }
+                        if (autoConfigure || pluginOptions.attackMiddle) {
+                            maxTools = maxToolsFront
+                            wave.M.T.forEach(unitSlot =>
+                                maxTools -= assignUnit(unitSlot, selectTool(2), maxTools))
+                        }
                     }
 
                     let maxTroops = maxTroopFlank
 
-                    wave.L.U.forEach(unitSlot =>
-                        maxTroops -= assignUnit(unitSlot, attackerMeleeTroops.length <= 0 ?
-                            attackerRangeTroops : attackerMeleeTroops, maxTroops))
-                    maxTroops = maxTroopFlank
-                    wave.R.U.forEach(unitSlot =>
-                        maxTroops -= assignUnit(unitSlot, attackerMeleeTroops.length <= 0 ?
-                            attackerRangeTroops : attackerMeleeTroops, maxTroops))
-                    maxTroops = maxTroopFront
-                    wave.M.U.forEach(unitSlot =>
-                        maxTroops -= assignUnit(unitSlot, attackerRangeTroops.length <= 0 ?
-                            attackerMeleeTroops : attackerRangeTroops, maxTroops))
+                    if (autoConfigure || pluginOptions.attackLeft) {
+                        wave.L.U.forEach(unitSlot =>
+                            maxTroops -= assignUnit(unitSlot, attackerMeleeTroops.length <= 0 ?
+                                attackerRangeTroops : attackerMeleeTroops, maxTroops))
+                    }
+                    if (autoConfigure || pluginOptions.attackRight) {
+                        maxTroops = maxTroopFlank
+                        wave.R.U.forEach(unitSlot =>
+                            maxTroops -= assignUnit(unitSlot, attackerMeleeTroops.length <= 0 ?
+                                attackerRangeTroops : attackerMeleeTroops, maxTroops))
+                    }
+                    if (autoConfigure || pluginOptions.attackMiddle) {
+                        maxTroops = maxTroopFront
+                        wave.M.U.forEach(unitSlot =>
+                            maxTroops -= assignUnit(unitSlot, attackerRangeTroops.length <= 0 ?
+                                attackerMeleeTroops : attackerRangeTroops, maxTroops))
+                    }
                 })
-                let maxTroops = getMaxUnitsInReinforcementWave(playerInfo.level, level) + Number(0 | commanderStats.attackUnitAmountReinforcementBonus)
+                let maxTroops = configCy || (getMaxUnitsInReinforcementWave(playerInfo.level, level) + Number(0 | commanderStats.attackUnitAmountReinforcementBonus))
                 attackInfo.RW.forEach((unitSlot, i) => {
                     let attacker = i & 1 ?
                         (attackerMeleeTroops.length > 0 ? attackerMeleeTroops : attackerRangeTroops) :

@@ -233,6 +233,13 @@ let alreadyRunning = false
 let attackCount = undefined
 let attackThreshold = undefined
 
+// Timestamp of the most recent dispatch out of the shared queue below, exposed
+// so other movement-creating actions outside this queue (e.g. a kingdom troop
+// transfer) can avoid landing in the same server-side army-creation settling
+// window and triggering CANT_START_NEW_ARMIES.
+let lastDispatchAt = 0
+const getLastAttackDispatchAt = () => lastDispatchAt
+
 if([,""].includes(pluginOptions.attackLimit))
     pluginOptions.attackLimit = 3500
     
@@ -275,6 +282,7 @@ const waitToAttack = callback => new Promise(async (resolve, reject) => {
 
                 console.debug("attackDelayAttack", naturalDelay)
 
+                lastDispatchAt = Date.now()
                 if (!await(attacks.shift()()))
                     continue
 
@@ -291,6 +299,7 @@ module.exports = {
     getAttackInfo,
     assignUnit,
     waitToAttack,
+    getLastAttackDispatchAt,
     getTotalAmountToolsFlank,
     getTotalAmountToolsFront,
     getAmountSoldiersFlank,
