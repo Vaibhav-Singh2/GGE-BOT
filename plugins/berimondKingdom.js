@@ -29,6 +29,11 @@ if (require('node:worker_threads').isMainThread)
             },
             {
                 type: "Text",
+                key: "ladderCount",
+                default: "0"
+            },
+            {
+                type: "Text",
                 key: "shieldCount",
                 default: "0"
             },
@@ -41,6 +46,11 @@ if (require('node:worker_threads').isMainThread)
                 type: "Checkbox",
                 key: "useCoin",
                 default: false
+            },
+            {
+                type: "Checkbox",
+                key: "berimondLadders",
+                default: true
             },
             {
                 type: "Checkbox",
@@ -92,7 +102,9 @@ const attackSolCount = Math.min(maxFlankSols,
 if (Number(pluginOptions.attackSolCount) > maxFlankSols)
     console.warn("attackSolCountCappedTo", maxFlankSols)
 const useLeftFlank = pluginOptions.leftFlank ?? false
+const ladderCount = Number(pluginOptions.ladderCount ?? 0)
 const shieldCount = Number(pluginOptions.shieldCount ?? 0)
+const useBerimondLadders = pluginOptions.berimondLadders ?? true
 const useBerimondShields = pluginOptions.berimondShields ?? true
 const fillOtherFlanks = pluginOptions.fillOtherFlanks ?? false
 const autoResupplyCamp = pluginOptions.autoResupplyCamp ?? true
@@ -518,9 +530,17 @@ async function attackBerimond() {
 
     const lord = await waitForCommanderAvailable(commanderWhitelist)
 
+    const ladder = useBerimondLadders
+        ? (beriCastle.unitInventory?.find(u => u.amount > 0 && u.unitInfo?.type == "BerimondAntiLadder")
+            ?? beriCastle.unitInventory?.find(u => u.amount > 0 && u.unitInfo?.type == "Ladder"))
+        : (beriCastle.unitInventory?.find(u => u.amount > 0 && u.unitInfo?.type == "Ladder")
+            ?? beriCastle.unitInventory?.find(u => u.amount > 0 && u.unitInfo?.type == "BerimondAntiLadder"))
+
     const shield = useBerimondShields
-        ? beriCastle.unitInventory?.find(u => u.amount > 0 && u.unitInfo?.type == "BerimondAntiShields")
-        : beriCastle.unitInventory?.find(u => u.amount > 0 && u.unitInfo?.type == "Shields")
+        ? (beriCastle.unitInventory?.find(u => u.amount > 0 && u.unitInfo?.type == "BerimondAntiShields")
+            ?? beriCastle.unitInventory?.find(u => u.amount > 0 && u.unitInfo?.type == "Shields"))
+        : (beriCastle.unitInventory?.find(u => u.amount > 0 && u.unitInfo?.type == "Shields")
+            ?? beriCastle.unitInventory?.find(u => u.amount > 0 && u.unitInfo?.type == "BerimondAntiShields"))
 
     const attackInfo = getAttackInfo(KingdomID.berimond, beriCastle, towerInfo, lord, 70, 1, pluginOptions, 0)
 
@@ -531,6 +551,11 @@ async function attackBerimond() {
     // up to the configured attack size.
     let remainingSols = attackSolCount
     flank.U.forEach(unitSlot => remainingSols -= assignUnit(unitSlot, rangedUnits, remainingSols))
+
+    if (ladder && ladderCount > 0 && flank.T[0]) {
+        flank.T[0][0] = ladder.unitInfo.wodID
+        flank.T[0][1] = Math.min(ladderCount, ladder.amount)
+    }
 
     if (shield && shieldCount > 0 && flank.T[1]) {
         flank.T[1][0] = shield.unitInfo.wodID
