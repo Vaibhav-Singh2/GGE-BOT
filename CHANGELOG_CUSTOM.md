@@ -9,8 +9,13 @@ This document tracks all custom features, fixes, and new plugins added to this f
 | Plugin | Path | Description / Purpose |
 | :--- | :--- | :--- |
 | **Recruit** | `plugins/recruit.js` | Automates troop recruitment across specified castles, slots, and quantities. Uses castle configuration format `areaID:wodID:slotID:amount`. |
+| **Coin Spender** | `plugins/coinSpender.js` | Dumps excess coins above threshold into siege ladders and mantlets. |
+| **Tool Production** | `plugins/toolBuild.js` | Continuous workshop tool crafting across castles (`areaID:wodID:amount:slotID`). |
+| **Stored Equipment & Gems** | `plugins/sellStoredEquipment.js` | Bulk automated equipment and gem liquidation with socketed and Technicus filters. |
+| **Castle Defense & Troop Dodge** | `plugins/troopDodge.js` | Advanced incoming attack evasion with auto-pullback timer, safe castle fallback, and gate opening. |
+| **Military Hospital Healer** | `plugins/hospitalHealer.js` | Automated recovery of injured troops with coin/ruby segregation and alliance medical assistance. |
+| **Message & Report Management** | `plugins/messageManagement.js` | Automated background filtering and deletion of inbox combat reports and delivery logs. |
 | **Berimond Kingdom** | `plugins/berimondKingdom.js` | Dedicated automation for Berimond Kingdom events, actions, and management. |
-| **Troop Dodge** | `plugins/troopDodge.js` | Automated troop evasion/dodging mechanism when incoming attacks are detected. |
 | **Capture Storm Resource Islands** | `plugins/attack/captureStormRI.js` | Automatically detects and sends attacks/captures for Storm Islands resource sites. |
 | **Colossus Event Donate** | `plugins/colossusEventDonate.js` | Automates resource contributions to the Colossus event. |
 | **Send Food (Storm)** | `plugins/foodSendStorm.js` | Automated food supply logistics to maintain Storm Island garrisons. |
