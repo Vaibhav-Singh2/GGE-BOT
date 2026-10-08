@@ -137,10 +137,11 @@ function getCampCapacity(beriCastle) {
 }
 
 function isSoldierUnit(u) {
-    return u?.unitInfo?.group === "Unit" ||
-        !!u?.unitInfo?.role ||
-        Number(u?.unitInfo?.foodSupply) > 0 ||
-        Number(u?.unitInfo?.isAuxiliary) > 0
+    const info = u?.unitInfo
+    if (!info) return false
+    if (info.toolCategory || info.typ || info.wallBonus || info.pointBonus || info.defRangeBonus || info.defMeleeBonus || info.gateBonus || info.moatBonus)
+        return false
+    return info.role === "melee" || info.role === "ranged" || Number(info.foodSupply) > 0 || Number(info.isAuxiliary) > 0
 }
 
 // isAuxiliary marks the camp-native "beri" ranged troop (AuxiliaryRange, wodID 14).

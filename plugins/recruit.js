@@ -131,6 +131,8 @@ const tryRecruit = async () => {
             const result = await ClientCommands.recruitUnit(target.castle.id, primaryWodID, batchAmount, 0, lordIDFor(primaryWodID))
             if (result === 0) {
                 console.log(`[RecruitBot] Queued ${batchAmount}x ${unitName(primaryWodID)} at ${target.name} (${target.castle.id})`)
+            } else if (result == 73 || err[result] === "NO_FREE_CONSTRUCTION_SLOT") {
+                // Slots currently busy recruiting, will retry next interval
             } else {
                 console.warn(`[RecruitBot] Failed at ${target.name} (${target.castle.id}):`, err[result] ?? result)
             }
