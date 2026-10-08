@@ -130,8 +130,10 @@ const waitForResult = (key, timeout, func) => new Promise((resolve, reject) => {
             checkForIssues()
         if (!func(Object(data), Number(_result)))
             return
-        if(_result != 0)
-            console.warn(key, msg)
+        if(_result != 0) {
+            if (!(key === "bup" && (msg === "NO_FREE_CONSTRUCTION_SLOT" || _result == 73)))
+                console.warn(key, msg)
+        }
         else {
             // Count consecutive failures, not lifetime ones: otherwise a long
             // session eventually pauses the socket or exits on scattered errors.

@@ -543,9 +543,23 @@ async function resupplyBerimondCamp() {
 
     const { effectiveFreeSpace, calculatedFreeSpace, serverFuc, campTroops, transitTroops, totalCap } = spaceInfo
 
-    if (effectiveFreeSpace < minFreeSpaceToResupply) {
+    const solsNeeded = attackSolCount + (fillOtherFlanks ? 2 : 0)
+    const isStarvingForAttack = campTroops.attack < solsNeeded
+
+    // When the camp has enough troops to attack, wait for minFreeSpaceToResupply (100+).
+    // But when the camp has run out of attack troops (< 35), resupply as long as at least
+    // 1 full attack wave fits (>= attackSolCount) to avoid stalling for 40+ minutes!
+    const requiredFreeSpace = isStarvingForAttack ? attackSolCount : minFreeSpaceToResupply
+
+    if (effectiveFreeSpace < attackSolCount) {
         return console.log("berimondCampFreeSpace", effectiveFreeSpace,
-            "belowMinimum", minFreeSpaceToResupply,
+            "belowAttackSolCount", attackSolCount,
+            `(inside: ${campTroops.total}, transit: ${transitTroops.total}, cap: ${totalCap}, serverFuc: ${serverFuc})`)
+    }
+
+    if (effectiveFreeSpace < requiredFreeSpace) {
+        return console.log("berimondCampFreeSpace", effectiveFreeSpace,
+            "belowMinimum", requiredFreeSpace,
             `(inside: ${campTroops.total}, transit: ${transitTroops.total}, cap: ${totalCap}, serverFuc: ${serverFuc})`)
     }
 
@@ -595,15 +609,15 @@ async function resupplyBerimondCamp() {
         transferArrivesAt = lastResupplySentAt + getTransferRemainingMs(beriCastle)
         nextFreeSpaceCheckAt = Math.min(nextFreeSpaceCheckAt, transferArrivesAt + arrivalGraceMs)
         refreshAfterArrival = true
+
+        if (useSkipsForResupply) {
+            await skipTroopTransfer(beriCastle)
+            transferArrivesAt = Date.now() + getTransferRemainingMs(beriCastle)
+            nextFreeSpaceCheckAt = Math.min(nextFreeSpaceCheckAt, transferArrivesAt + arrivalGraceMs)
+        }
+
         console.log("berimondResupplySent", sendable, "freeSpaceWas", effectiveFreeSpace, JSON.stringify(units),
-            "arrivesInSeconds", Math.round((transferArrivesAt - lastResupplySentAt) / 1000))
-
-        if (!useSkipsForResupply)
-            return
-
-        await skipTroopTransfer(beriCastle)
-        transferArrivesAt = Date.now() + getTransferRemainingMs(beriCastle)
-        nextFreeSpaceCheckAt = Math.min(nextFreeSpaceCheckAt, transferArrivesAt + arrivalGraceMs)
+            "arrivesInSeconds", Math.round(Math.max(0, transferArrivesAt - Date.now()) / 1000))
     } finally {
         resupplyInFlight = false
     }
