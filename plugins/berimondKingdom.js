@@ -69,8 +69,13 @@ if (require('node:worker_threads').isMainThread)
             },
             {
                 type: "Text",
+                key: "campCapacity",
+                default: "222"
+            },
+            {
+                type: "Text",
                 key: "minFreeSpaceToResupply",
-                default: "100"
+                default: "35"
             },
             {
                 type: "Text",
@@ -86,8 +91,8 @@ if (require('node:worker_threads').isMainThread)
     }
 
 const path = require("node:path")
-const { sendXT, waitForResult, events, botConfig, xtHandler } = require("../ggeBot.js")
-const { ClientCommands, KingdomID, AreaType, KingdomSkipType, castles, setCastle, movementEvents } = require("../protocols.js")
+const { sendXT, waitForResult, events, botConfig, xtHandler, playerInfo } = require("../ggeBot.js")
+const { ClientCommands, KingdomID, AreaType, KingdomSkipType, castles, setCastle, movementEvents, movements } = require("../protocols.js")
 const { waitForCommanderAvailable, freeCommander } = require("./commander.js")
 const { getAttackInfo, assignUnit, waitToAttack, getLastAttackDispatchAt } = require("./attack/attack.js")
 const { spendSkip } = require("./skips.js")
@@ -108,7 +113,9 @@ const useBerimondLadders = pluginOptions.berimondLadders ?? true
 const useBerimondShields = pluginOptions.berimondShields ?? true
 const fillOtherFlanks = pluginOptions.fillOtherFlanks ?? false
 const autoResupplyCamp = pluginOptions.autoResupplyCamp ?? true
-const minFreeSpaceToResupply = Math.max(1, Math.floor(Number(pluginOptions.minFreeSpaceToResupply) || 100))
+const configuredCampCapacity = Math.max(0, Math.floor(Number(pluginOptions.campCapacity) || 0))
+let detectedCampCapacity = configuredCampCapacity || 222
+const minFreeSpaceToResupply = Math.max(1, Math.floor(Number(pluginOptions.minFreeSpaceToResupply) || 35))
 const mainCastleReserve = Math.max(0, Number(pluginOptions.mainCastleReserve ?? 0) || 0)
 const useSkipsForResupply = pluginOptions.useSkipsForResupply ?? true
 
@@ -117,6 +124,24 @@ const getBeriCastle = () =>
 
 const getMainCastle = () =>
     castles.find(e => e.kingdomID == KingdomID.greatEmpire && e.areaInfo?.type == AreaType.mainCastle)
+
+function getCampCapacity(beriCastle) {
+    if (configuredCampCapacity > 0)
+        return configuredCampCapacity
+
+    const prodMax = Number(beriCastle?.getProductionData?.maxUnitStorage)
+    if (Number.isFinite(prodMax) && prodMax > 0) {
+        detectedCampCapacity = Math.max(detectedCampCapacity, prodMax)
+    }
+    return Math.max(detectedCampCapacity, 222)
+}
+
+function isSoldierUnit(u) {
+    return u?.unitInfo?.group === "Unit" ||
+        !!u?.unitInfo?.role ||
+        Number(u?.unitInfo?.foodSupply) > 0 ||
+        Number(u?.unitInfo?.isAuxiliary) > 0
+}
 
 // isAuxiliary marks the camp-native "beri" ranged troop (AuxiliaryRange, wodID 14).
 // foodSupply > 0 additionally excludes mead-fed troops (MeadRanger/MeadBow from
@@ -144,6 +169,88 @@ const isSelectedTroop = troopIDs.length > 0
     : isFoodRangedUnit
 const troopPriority = u => troopIDs.indexOf(Number(u.unitInfo?.wodID))
 
+function getCampTroopCounts(beriCastle) {
+    if (!beriCastle?.unitInventory) return { total: 0, attack: 0, other: 0 }
+    let total = 0
+    let attack = 0
+    let other = 0
+    for (const u of beriCastle.unitInventory) {
+        const amount = Number(u.amount) || 0
+        if (amount <= 0) continue
+        if (isSoldierUnit(u)) {
+            total += amount
+            if (isSelectedTroop(u)) {
+                attack += amount
+            } else {
+                other += amount
+            }
+        }
+    }
+    return { total, attack, other }
+}
+
+function getTransitTroopCounts() {
+    let totalTransit = 0
+    let attackTransit = 0
+    let hasMovementTroops = false
+
+    const myPID = Number(playerInfo?.playerID)
+
+    for (const m of movements) {
+        if (m.kingdomID !== KingdomID.berimond) continue
+        const isOurMovement = !myPID ||
+            m.owner?.ownerID === myPID ||
+            m.sourceOwner?.ownerID === myPID ||
+            m.targetOwner?.ownerID === myPID
+        if (!isOurMovement) continue
+
+        const armyUnits = (m.station && m.station.length > 0)
+            ? m.station
+            : [...(m.left || []), ...(m.middle || []), ...(m.right || []), ...(m.courtyard || [])]
+
+        for (const u of armyUnits) {
+            const amount = Number(u.amount) || 0
+            if (amount <= 0) continue
+            if (isSoldierUnit(u)) {
+                totalTransit += amount
+                hasMovementTroops = true
+                if (isSelectedTroop(u)) {
+                    attackTransit += amount
+                }
+            }
+        }
+    }
+
+    const beriCastle = getBeriCastle()
+    if (!hasMovementTroops && beriCastle?.travelingUnits?.length > 0) {
+        for (const u of beriCastle.travelingUnits) {
+            const amount = Number(u.amount) || 0
+            if (amount <= 0) continue
+            if (isSoldierUnit(u)) {
+                totalTransit += amount
+                if (isSelectedTroop(u)) {
+                    attackTransit += amount
+                }
+            }
+        }
+    }
+
+    if (beriCastle?.troopTransfer?.units && getTransferRemainingMs(beriCastle) > 0) {
+        for (const u of beriCastle.troopTransfer.units) {
+            const amount = Number(u.amount) || 0
+            if (amount <= 0) continue
+            if (isSoldierUnit(u)) {
+                totalTransit += amount
+                if (isSelectedTroop(u)) {
+                    attackTransit += amount
+                }
+            }
+        }
+    }
+
+    return { total: totalTransit, attack: attackTransit }
+}
+
 const randomIntFromInterval = (min, max) =>
     Math.floor(Math.random() * (max - min + 1) + min)
 
@@ -168,12 +275,11 @@ const minResupplyIntervalMs = 1000 * 90
 const arrivalGraceMs = 1000 * 60
 
 // Free camp space comes from the server ("fuc", what the game sends when the
-// Send troops dialog opens). It already counts sols out on attacks and follows
-// camp upgrades. CID 120 is the value the game client sends for Berimond.
+// Send troops dialog opens). CID 120 is the value the game client sends for Berimond.
 const freeSpaceRequestCID = 120
 // Scheduled checks run every 5-10 min; the attack loop can ask for an earlier
-// one when it runs dry, but never more often than this.
-const minFreeSpaceCheckGapMs = 1000 * 60 * 2
+// one when it runs dry.
+const minFreeSpaceCheckGapMs = 1000 * 15
 let nextFreeSpaceCheckAt = 0
 let lastFreeSpaceCheckAt = 0
 let freeSpaceCheckRequested = false
@@ -187,11 +293,35 @@ async function getCampFreeSpace() {
     if (result != 0)
         throw err[result] ?? result
 
-    const freeSpace = Number(obj?.FUC)
-    if (!Number.isFinite(freeSpace) || freeSpace < 0)
+    const fucVal = Number(obj?.FUC)
+    if (!Number.isFinite(fucVal) || fucVal < 0)
         throw "berimondFreeSpaceMissing"
 
-    return freeSpace
+    const beriCastle = getBeriCastle()
+    const campTroops = getCampTroopCounts(beriCastle)
+    const transitTroops = getTransitTroopCounts()
+    const totalOccupied = campTroops.total + transitTroops.total
+
+    if (fucVal + totalOccupied > detectedCampCapacity) {
+        detectedCampCapacity = fucVal + totalOccupied
+    }
+    const totalCap = getCampCapacity(beriCastle)
+
+    // Formula requested by user:
+    // "bot should count all the sols, inside camp and outside camp both, and then minus it with total capacity of camp"
+    const calculatedFreeSpace = Math.max(0, totalCap - totalOccupied)
+    const effectiveFreeSpace = Math.min(fucVal, calculatedFreeSpace)
+
+    console.log("berimondCampStatus",
+        `inside: ${campTroops.total} (${campTroops.attack} attack)`,
+        `transit: ${transitTroops.total} (${transitTroops.attack} attack)`,
+        `totalOccupied: ${totalOccupied}`,
+        `capacity: ${totalCap}`,
+        `calculatedFree: ${calculatedFreeSpace}`,
+        `serverFuc: ${fucVal}`,
+        `effectiveFree: ${effectiveFreeSpace}`)
+
+    return { effectiveFreeSpace, calculatedFreeSpace, fucVal, campTroops, transitTroops, totalCap }
 }
 
 // castle.troopTransfer.remainingTime (RS, seconds) is a snapshot from the last
@@ -264,7 +394,7 @@ async function gateArmyStart() {
 // one after troops land (returns, transfers) and every 5-10 min keeps the local
 // count honest. At most one per minute: a request inside that window is
 // postponed to its end, and one already pending absorbs later requests.
-const minCampRefreshGapMs = 1000 * 60
+const minCampRefreshGapMs = 1000 * 15
 let lastCampRefreshAt = 0
 let campRefreshPending = false
 function refreshCampData(delayMs = 0) {
@@ -302,7 +432,7 @@ movementEvents.on("return", movement => {
     if (movement?.kingdomID != KingdomID.berimond)
         return
     campCountConfirmed = false
-    refreshCampData(randomIntFromInterval(1000 * 5, 1000 * 15))
+    refreshCampData(randomIntFromInterval(1000 * 2, 1000 * 5))
 })
 
 // Fresh castle data (after a transfer lands, after returns, periodic refresh)
@@ -402,15 +532,35 @@ async function resupplyBerimondCamp() {
         return
     freeSpaceCheckRequested = false
 
-    let freeSpace
+    let spaceInfo
     try {
-        freeSpace = await getCampFreeSpace()
+        spaceInfo = await getCampFreeSpace()
     } catch (e) {
         return console.warn("berimondFreeSpaceCheckFailed", e)
     }
 
-    if (freeSpace < minFreeSpaceToResupply)
-        return console.log("berimondCampFreeSpace", freeSpace, "belowMinimum", minFreeSpaceToResupply)
+    const { effectiveFreeSpace, campTroops, transitTroops, totalCap } = spaceInfo
+
+    const solsNeeded = attackSolCount + (fillOtherFlanks ? 2 : 0)
+    const isStarvingForAttack = campTroops.attack < solsNeeded
+
+    if (effectiveFreeSpace < attackSolCount) {
+        return console.log("berimondCampFreeSpace", effectiveFreeSpace,
+            "belowAttackSolCount", attackSolCount,
+            `(inside: ${campTroops.total}, transit: ${transitTroops.total}, cap: ${totalCap})`)
+    }
+
+    // If camp is starving for attack troops, allow resupplying as long as at least 1 attack wave fits.
+    // Otherwise respect minFreeSpaceToResupply (capped to reasonable fraction of camp capacity).
+    const requiredFreeSpace = isStarvingForAttack
+        ? attackSolCount
+        : Math.min(minFreeSpaceToResupply, Math.max(attackSolCount, Math.floor(totalCap * 0.4)))
+
+    if (effectiveFreeSpace < requiredFreeSpace) {
+        return console.log("berimondCampFreeSpace", effectiveFreeSpace,
+            "belowMinimum", requiredFreeSpace,
+            `(inside: ${campTroops.total}, transit: ${transitTroops.total}, cap: ${totalCap})`)
+    }
 
     const mainCastle = getMainCastle()
     if (!mainCastle)
@@ -427,12 +577,12 @@ async function resupplyBerimondCamp() {
         ?? []
 
     const totalAvailable = availableUnits.reduce((sum, u) => sum + u.amount, 0)
-    const sendable = Math.min(freeSpace, totalAvailable - mainCastleReserve)
+    const sendable = Math.min(effectiveFreeSpace, totalAvailable - mainCastleReserve)
 
     // Less than one attack's worth isn't worth a transfer
     if (sendable < attackSolCount)
         return backOffResupply("notEnoughFoodRangedTroopsToResupplyBerimond",
-            "freeSpace", freeSpace, "available", totalAvailable, "reserve", mainCastleReserve)
+            "freeSpace", effectiveFreeSpace, "available", totalAvailable, "reserve", mainCastleReserve)
 
     let remaining = sendable
     const units = []
@@ -456,7 +606,7 @@ async function resupplyBerimondCamp() {
         transferArrivesAt = lastResupplySentAt + getTransferRemainingMs(beriCastle)
         nextFreeSpaceCheckAt = Math.min(nextFreeSpaceCheckAt, transferArrivesAt + arrivalGraceMs)
         refreshAfterArrival = true
-        console.log("berimondResupplySent", sendable, "freeSpaceWas", freeSpace, JSON.stringify(units),
+        console.log("berimondResupplySent", sendable, "freeSpaceWas", effectiveFreeSpace, JSON.stringify(units),
             "arrivesInSeconds", Math.round((transferArrivesAt - lastResupplySentAt) / 1000))
 
         if (!useSkipsForResupply)
@@ -510,8 +660,12 @@ async function attackBerimond() {
     // transfers, fresh castle data) instead of trickling in a weak one. The
     // timeout is only a backstop in case an arrival is missed.
     if (totalRangedSols < solsNeeded) {
+        const transit = getTransitTroopCounts()
         if (totalRangedSols != lastShortCount)
-            console.warn("notEnoughBerimondSolsToAttack", totalRangedSols, "needed", solsNeeded, "waitingForTroops")
+            console.warn("notEnoughBerimondSolsToAttack", totalRangedSols,
+                "inTransit", transit.attack,
+                "totalBerimondSols", totalRangedSols + transit.attack,
+                "needed", solsNeeded, "waitingForTroops")
         lastShortCount = totalRangedSols
         wakeResupply()
         await waitForCampChange(jitterMs(1000 * 60 * 5))
