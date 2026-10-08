@@ -60,6 +60,8 @@ const ggeConfigExample = `{
 
 const loggedInUsers = {}
 const botMap = new Map()
+const botSessions = new Map()
+const lastUserStatus = new Map()
 
 const userDatabase = new DatabaseSync('./user.db', { timeout: 1000 * 60 })
 userDatabase.exec(
@@ -440,6 +442,20 @@ async function start() {
     if (user.id && botMap.get(user.id) != undefined)
       throw Error(i18n.__("gameAccountSessionAlreadyInUse"))
 
+    if (user.id && !botSessions.has(user.id)) {
+      botSessions.set(user.id, {
+        startedAt: Date.now(),
+        startCoins: null,
+        startRubies: null,
+        currentCoins: null,
+        currentRubies: null,
+        coinsGained: 0,
+        rubiesGained: 0,
+        coinsPerHour: 0,
+        rubiesPerHour: 0
+      })
+    }
+
     let data = structuredClone(user)
 
     let discordCreds = uuid => {
@@ -624,11 +640,65 @@ async function start() {
               [worker.messageBuffer, worker.messageBufferCount]
             ])) : undefined)
           break
-        case ActionType.StatusUser:
+        case ActionType.StatusUser: {
           obj[1].id = user.id
+          let session = botSessions.get(user.id)
+          if (!session) {
+            session = {
+              startedAt: Date.now(),
+              startCoins: null,
+              startRubies: null,
+              currentCoins: null,
+              currentRubies: null,
+              coinsGained: 0,
+              rubiesGained: 0,
+              coinsPerHour: 0,
+              rubiesPerHour: 0
+            }
+            botSessions.set(user.id, session)
+          }
+
+          const rawCoins = obj[1].cash !== undefined ? Number(obj[1].cash) : undefined
+          const rawRubies = obj[1].gold !== undefined ? Number(obj[1].gold) : undefined
+
+          if (rawCoins !== undefined && !isNaN(rawCoins)) {
+            if (session.startCoins === null) {
+              session.startCoins = rawCoins
+            }
+            session.currentCoins = rawCoins
+            session.coinsGained = rawCoins - session.startCoins
+          }
+
+          if (rawRubies !== undefined && !isNaN(rawRubies)) {
+            if (session.startRubies === null) {
+              session.startRubies = rawRubies
+            }
+            session.currentRubies = rawRubies
+            session.rubiesGained = rawRubies - session.startRubies
+          }
+
+          const elapsedHours = (Date.now() - session.startedAt) / (1000 * 60 * 60)
+          if (elapsedHours >= 0.004) {
+            session.coinsPerHour = Math.round(session.coinsGained / elapsedHours)
+            session.rubiesPerHour = Math.round(session.rubiesGained / elapsedHours)
+          }
+
+          obj[1].sessionStartedAt = session.startedAt
+          obj[1].startCoins = session.startCoins
+          obj[1].startRubies = session.startRubies
+          obj[1].coinsGained = session.coinsGained
+          obj[1].rubiesGained = session.rubiesGained
+          obj[1].coinsPerHour = session.coinsPerHour
+          obj[1].rubiesPerHour = session.rubiesPerHour
+          obj[1].uptimeMs = Date.now() - session.startedAt
+
+          const existingStatus = lastUserStatus.get(user.id) || {}
+          lastUserStatus.set(user.id, { ...existingStatus, ...obj[1] })
+
           loggedInUsers[uuid]?.forEach(o =>
             o.ws.send(JSON.stringify([ErrorType.Success, ActionType.StatusUser, obj[1]])))
           break
+        }
         case ActionType.RemoveUser:
           worker.off('exit', onTerminate)
           removeUser(uuid, user)
@@ -658,6 +728,8 @@ async function start() {
   }
 
   const removeBot = id => {
+    botSessions.delete(id)
+    lastUserStatus.delete(id)
     const worker = botMap.get(id)
 
     if (worker == undefined)
@@ -723,6 +795,11 @@ async function start() {
     users.forEach(user => {
       if (user.state != 1)
         return
+
+      const cached = lastUserStatus.get(user.id)
+      if (cached) {
+        ws.send(JSON.stringify([ErrorType.Success, ActionType.StatusUser, cached]))
+      }
 
       let worker = botMap.get(user.id)
       if (worker == undefined)

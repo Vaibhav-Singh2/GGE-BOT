@@ -154,6 +154,9 @@ const webSocket = new WebSocket(`wss://${botConfig.gameURL}/`, {
   })
 
 const status = {}
+const sessionStartedAt = Date.now()
+let startCoins = null
+let startRubies = null
 const playerInfo = {
     level: NaN,
     userID: NaN,
@@ -289,9 +292,29 @@ xtHandler.on("gpi", obj => {
     playerInfo.isCheater = Boolean(obj.CL)
 })
 xtHandler.on("gcu", obj => {
+    const rawCoin = obj.C1 != null ? Math.floor(playerInfo.coin = obj.C1) : undefined
+    const rawGold = obj.C2 != null ? Math.floor(playerInfo.rubies = obj.C2) : undefined
+
+    if (rawCoin !== undefined && startCoins === null) startCoins = rawCoin
+    if (rawGold !== undefined && startRubies === null) startRubies = rawGold
+
+    const elapsedHours = (Date.now() - sessionStartedAt) / (1000 * 60 * 60)
+    const coinsGained = (rawCoin !== undefined && startCoins !== null) ? (rawCoin - startCoins) : 0
+    const rubiesGained = (rawGold !== undefined && startRubies !== null) ? (rawGold - startRubies) : 0
+    const coinsPerHour = elapsedHours >= 0.004 ? Math.round(coinsGained / elapsedHours) : 0
+    const rubiesPerHour = elapsedHours >= 0.004 ? Math.round(rubiesGained / elapsedHours) : 0
+
     Object.assign(status, {
-        cash: obj.C1 != 0 ? Math.floor(playerInfo.coin = obj.C1) : undefined,
-        gold: obj.C2 != 0 ? Math.floor(playerInfo.rubies = obj.C2) : undefined,
+        cash: rawCoin,
+        gold: rawGold,
+        sessionStartedAt,
+        startCoins,
+        startRubies,
+        coinsGained,
+        rubiesGained,
+        coinsPerHour,
+        rubiesPerHour,
+        uptimeMs: Date.now() - sessionStartedAt,
         requestCount,
         errorCount
     })
@@ -319,6 +342,14 @@ parentPort.on("message", async obj => {
             break
             break
         case ActionType.StatusUser:
+            if (status.sessionStartedAt) {
+                const elapsedHours = (Date.now() - status.sessionStartedAt) / (1000 * 60 * 60)
+                if (elapsedHours >= 0.004) {
+                    status.coinsPerHour = Math.round((status.coinsGained || 0) / elapsedHours)
+                    status.rubiesPerHour = Math.round((status.rubiesGained || 0) / elapsedHours)
+                }
+                status.uptimeMs = Date.now() - status.sessionStartedAt
+            }
             parentPort.postMessage([ActionType.StatusUser, status])
             break
         case ActionType.GetExternalEvent:
