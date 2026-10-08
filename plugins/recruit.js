@@ -3,71 +3,174 @@ if (require('node:worker_threads').isMainThread)
         pluginOptions: [
             {
                 type: "Text",
-                key: "castles",
-                default: ""
+                key: "batchAmount",
+                default: "100"
             },
             {
                 type: "Text",
                 key: "intervalSeconds",
                 default: "600"
+            },
+            {
+                type: "Label",
+                key: "Great Empire Castles"
+            },
+            {
+                type: "Text",
+                key: "mainTroopIDs",
+                default: ""
+            },
+            {
+                type: "Text",
+                key: "outpost1TroopIDs",
+                default: ""
+            },
+            {
+                type: "Text",
+                key: "outpost2TroopIDs",
+                default: ""
+            },
+            {
+                type: "Text",
+                key: "outpost3TroopIDs",
+                default: ""
+            },
+            {
+                type: "Label",
+                key: "Kingdom Castles"
+            },
+            {
+                type: "Text",
+                key: "iceTroopIDs",
+                default: ""
+            },
+            {
+                type: "Text",
+                key: "desertTroopIDs",
+                default: ""
+            },
+            {
+                type: "Text",
+                key: "fireTroopIDs",
+                default: ""
+            },
+            {
+                type: "Label",
+                key: "Advanced Manual Entries"
+            },
+            {
+                type: "Text",
+                key: "castles",
+                default: "" // Backward-compatible format: areaID:wodID:slotID:amount
             }
         ]
     }
 
 const err = require("../err.json")
 const units = require("../items/units.json")
-const { ClientCommands, castles } = require("../protocols.js")
+const { ClientCommands, castles, KingdomID, AreaType } = require("../protocols.js")
 const { events, botConfig } = require("../ggeBot.js")
 const pluginOptions = botConfig.plugins[require("path").basename(__filename).slice(0, -3)] ?? {}
 
-// Format per entry: areaID:wodID:slotID:amount  (comma or newline separated)
-// e.g. 1465864:206:0:110,1486758:2026:2:90
-const recruitEntries = String(pluginOptions.castles || "")
-    .split(/[\n,]/)
-    .map(e => e.trim())
-    .filter(Boolean)
-    .map(e => {
-        const [areaID, wodID, slotID, amount] = e.split(":").map(Number)
-        return { areaID, wodID, slotID, amount, raw: e }
-    })
-    .filter(e => {
-        const valid = [e.areaID, e.wodID, e.slotID, e.amount].every(Number.isFinite)
-        if (!valid)
-            console.warn("recruitInvalidEntry", e.raw)
-        return valid
-    })
-
 const unitName = wodID => units.find(u => u.wodID == wodID)?.type ?? wodID
-// Barracks troops vs Workshop tools use a different LID (0 vs 1) in the "bup" packet;
-// tools are the only units carrying a toolCategory field, so use that to tell them apart.
 const lordIDFor = wodID => units.find(u => u.wodID == wodID)?.toolCategory != undefined ? 1 : 0
 
-const tryRecruit = async () => {
-    for (const entry of recruitEntries) {
-        const castle = castles.find(c => c.id == entry.areaID)
-        if (!castle) {
-            console.warn("recruitCastleNotFound", entry.areaID)
-            continue
+const parseTroopIDs = raw => {
+    return String(raw || "")
+        .split(/[\s,]+/)
+        .map(Number)
+        .filter(n => Number.isInteger(n) && n > 0)
+}
+
+const findTargetCastle = (type) => {
+    switch (type) {
+        case "Main":
+            return castles.find(c => c.kingdomID === KingdomID.greatEmpire && c.areaInfo?.type === AreaType.mainCastle)
+        case "Outpost1": {
+            const outposts = castles.filter(c => c.kingdomID === KingdomID.greatEmpire && c.areaInfo?.type === AreaType.outpost)
+            return outposts[0]
         }
+        case "Outpost2": {
+            const outposts = castles.filter(c => c.kingdomID === KingdomID.greatEmpire && c.areaInfo?.type === AreaType.outpost)
+            return outposts[1]
+        }
+        case "Outpost3": {
+            const outposts = castles.filter(c => c.kingdomID === KingdomID.greatEmpire && c.areaInfo?.type === AreaType.outpost)
+            return outposts[2]
+        }
+        case "Ice":
+            return castles.find(c => c.kingdomID === KingdomID.everWinterGlacier && [AreaType.externalKingdom, AreaType.mainCastle].includes(c.areaInfo?.type))
+        case "Desert":
+            return castles.find(c => c.kingdomID === KingdomID.burningSands && [AreaType.externalKingdom, AreaType.mainCastle].includes(c.areaInfo?.type))
+        case "Fire":
+            return castles.find(c => c.kingdomID === KingdomID.firePeaks && [AreaType.externalKingdom, AreaType.mainCastle].includes(c.areaInfo?.type))
+        default:
+            return null
+    }
+}
 
+const tryRecruit = async () => {
+    const batchAmount = Math.max(1, Number(pluginOptions.batchAmount || 100))
+
+    // 1. Process named castle mappings
+    const namedTargets = [
+        { name: "Main Castle", castle: findTargetCastle("Main"), troopIDs: parseTroopIDs(pluginOptions.mainTroopIDs) },
+        { name: "Outpost 1", castle: findTargetCastle("Outpost1"), troopIDs: parseTroopIDs(pluginOptions.outpost1TroopIDs) },
+        { name: "Outpost 2", castle: findTargetCastle("Outpost2"), troopIDs: parseTroopIDs(pluginOptions.outpost2TroopIDs) },
+        { name: "Outpost 3", castle: findTargetCastle("Outpost3"), troopIDs: parseTroopIDs(pluginOptions.outpost3TroopIDs) },
+        { name: "Everwinter Glacier", castle: findTargetCastle("Ice"), troopIDs: parseTroopIDs(pluginOptions.iceTroopIDs) },
+        { name: "Burning Sands", castle: findTargetCastle("Desert"), troopIDs: parseTroopIDs(pluginOptions.desertTroopIDs) },
+        { name: "Fire Peaks", castle: findTargetCastle("Fire"), troopIDs: parseTroopIDs(pluginOptions.fireTroopIDs) }
+    ]
+
+    for (const target of namedTargets) {
+        if (!target.castle || target.troopIDs.length === 0) continue
+
+        const primaryWodID = target.troopIDs[0]
         try {
-            const result = await ClientCommands.recruitUnit(entry.areaID, entry.wodID, entry.amount, entry.slotID, lordIDFor(entry.wodID))
-
-            if (result == 0)
-                console.log("recruited", entry.amount, unitName(entry.wodID), "at", entry.areaID)
-            else
-                console.warn("recruitFailed", entry.areaID, unitName(entry.wodID), err[result] ?? result)
+            const result = await ClientCommands.recruitUnit(target.castle.id, primaryWodID, batchAmount, 0, lordIDFor(primaryWodID))
+            if (result === 0) {
+                console.log(`[RecruitBot] Queued ${batchAmount}x ${unitName(primaryWodID)} at ${target.name} (${target.castle.id})`)
+            } else {
+                console.warn(`[RecruitBot] Failed at ${target.name} (${target.castle.id}):`, err[result] ?? result)
+            }
         } catch (e) {
-            console.warn("recruitError", entry.areaID, unitName(entry.wodID), e)
+            console.error(`[RecruitBot] Error at ${target.name}:`, e)
+        }
+    }
+
+    // 2. Process legacy / manual raw entries (areaID:wodID:slotID:amount)
+    if (pluginOptions.castles) {
+        const rawEntries = String(pluginOptions.castles || "")
+            .split(/[\n,]/)
+            .map(e => e.trim())
+            .filter(Boolean)
+            .map(e => {
+                const [areaID, wodID, slotID, amount] = e.split(":").map(Number)
+                return { areaID, wodID, slotID: slotID || 0, amount: amount || batchAmount }
+            })
+            .filter(e => [e.areaID, e.wodID].every(Number.isFinite))
+
+        for (const entry of rawEntries) {
+            const castle = castles.find(c => c.id == entry.areaID)
+            if (!castle) continue
+
+            try {
+                const result = await ClientCommands.recruitUnit(entry.areaID, entry.wodID, entry.amount, entry.slotID, lordIDFor(entry.wodID))
+                if (result === 0) {
+                    console.log(`[RecruitBot] Queued ${entry.amount}x ${unitName(entry.wodID)} at manual castle ${entry.areaID}`)
+                } else {
+                    console.warn(`[RecruitBot] Manual entry failed at ${entry.areaID}:`, err[result] ?? result)
+                }
+            } catch (e) {
+                console.error(`[RecruitBot] Manual entry error:`, e)
+            }
         }
     }
 }
 
 events.once("load", () => {
-    if (recruitEntries.length == 0)
-        return console.warn("recruitNoCastlesConfigured")
-
-    const intervalSeconds = Number(pluginOptions.intervalSeconds) || 300
+    const intervalSeconds = Math.max(30, Number(pluginOptions.intervalSeconds) || 600)
     setInterval(tryRecruit, intervalSeconds * 1000)
-    tryRecruit()
+    setTimeout(tryRecruit, 8000)
 })
