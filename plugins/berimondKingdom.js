@@ -70,12 +70,12 @@ if (require('node:worker_threads').isMainThread)
             {
                 type: "Text",
                 key: "campCapacity",
-                default: "222"
+                default: "355"
             },
             {
                 type: "Text",
                 key: "minFreeSpaceToResupply",
-                default: "35"
+                default: "100"
             },
             {
                 type: "Text",
@@ -114,8 +114,8 @@ const useBerimondShields = pluginOptions.berimondShields ?? true
 const fillOtherFlanks = pluginOptions.fillOtherFlanks ?? false
 const autoResupplyCamp = pluginOptions.autoResupplyCamp ?? true
 const configuredCampCapacity = Math.max(0, Math.floor(Number(pluginOptions.campCapacity) || 0))
-let detectedCampCapacity = configuredCampCapacity || 222
-const minFreeSpaceToResupply = Math.max(1, Math.floor(Number(pluginOptions.minFreeSpaceToResupply) || 35))
+let detectedCampCapacity = configuredCampCapacity || 355
+const minFreeSpaceToResupply = Math.max(1, Math.floor(Number(pluginOptions.minFreeSpaceToResupply) || 100))
 const mainCastleReserve = Math.max(0, Number(pluginOptions.mainCastleReserve ?? 0) || 0)
 const useSkipsForResupply = pluginOptions.useSkipsForResupply ?? true
 
@@ -133,7 +133,7 @@ function getCampCapacity(beriCastle) {
     if (Number.isFinite(prodMax) && prodMax > 0) {
         detectedCampCapacity = Math.max(detectedCampCapacity, prodMax)
     }
-    return Math.max(detectedCampCapacity, 222)
+    return Math.max(detectedCampCapacity, 355)
 }
 
 function isSoldierUnit(u) {
@@ -288,40 +288,24 @@ async function getCampFreeSpace() {
     lastFreeSpaceCheckAt = Date.now()
     nextFreeSpaceCheckAt = lastFreeSpaceCheckAt + randomIntFromInterval(5, 10) * 1000 * 60
 
-    await sendXT("fuc", JSON.stringify({ CID: freeSpaceRequestCID }))
-    const [obj, result] = await waitForResult("fuc", 1000 * 10)
-    if (result != 0)
-        throw err[result] ?? result
-
-    const fucVal = Number(obj?.FUC)
-    if (!Number.isFinite(fucVal) || fucVal < 0)
-        throw "berimondFreeSpaceMissing"
-
     const beriCastle = getBeriCastle()
     const campTroops = getCampTroopCounts(beriCastle)
     const transitTroops = getTransitTroopCounts()
     const totalOccupied = campTroops.total + transitTroops.total
-
-    if (fucVal + totalOccupied > detectedCampCapacity) {
-        detectedCampCapacity = fucVal + totalOccupied
-    }
     const totalCap = getCampCapacity(beriCastle)
 
     // Formula requested by user:
-    // "bot should count all the sols, inside camp and outside camp both, and then minus it with total capacity of camp"
+    // "we calculate space by total camp capacity which is currently 355 - (troops inside camp+outside camp)"
     const calculatedFreeSpace = Math.max(0, totalCap - totalOccupied)
-    const effectiveFreeSpace = Math.min(fucVal, calculatedFreeSpace)
 
     console.log("berimondCampStatus",
         `inside: ${campTroops.total} (${campTroops.attack} attack)`,
         `transit: ${transitTroops.total} (${transitTroops.attack} attack)`,
         `totalOccupied: ${totalOccupied}`,
         `capacity: ${totalCap}`,
-        `calculatedFree: ${calculatedFreeSpace}`,
-        `serverFuc: ${fucVal}`,
-        `effectiveFree: ${effectiveFreeSpace}`)
+        `calculatedFreeSpace: ${calculatedFreeSpace}`)
 
-    return { effectiveFreeSpace, calculatedFreeSpace, fucVal, campTroops, transitTroops, totalCap }
+    return { calculatedFreeSpace, campTroops, transitTroops, totalCap }
 }
 
 // castle.troopTransfer.remainingTime (RS, seconds) is a snapshot from the last
@@ -539,26 +523,11 @@ async function resupplyBerimondCamp() {
         return console.warn("berimondFreeSpaceCheckFailed", e)
     }
 
-    const { effectiveFreeSpace, campTroops, transitTroops, totalCap } = spaceInfo
+    const { calculatedFreeSpace, campTroops, transitTroops, totalCap } = spaceInfo
 
-    const solsNeeded = attackSolCount + (fillOtherFlanks ? 2 : 0)
-    const isStarvingForAttack = campTroops.attack < solsNeeded
-
-    if (effectiveFreeSpace < attackSolCount) {
-        return console.log("berimondCampFreeSpace", effectiveFreeSpace,
-            "belowAttackSolCount", attackSolCount,
-            `(inside: ${campTroops.total}, transit: ${transitTroops.total}, cap: ${totalCap})`)
-    }
-
-    // If camp is starving for attack troops, allow resupplying as long as at least 1 attack wave fits.
-    // Otherwise respect minFreeSpaceToResupply (capped to reasonable fraction of camp capacity).
-    const requiredFreeSpace = isStarvingForAttack
-        ? attackSolCount
-        : Math.min(minFreeSpaceToResupply, Math.max(attackSolCount, Math.floor(totalCap * 0.4)))
-
-    if (effectiveFreeSpace < requiredFreeSpace) {
-        return console.log("berimondCampFreeSpace", effectiveFreeSpace,
-            "belowMinimum", requiredFreeSpace,
+    if (calculatedFreeSpace < minFreeSpaceToResupply) {
+        return console.log("berimondCampFreeSpace", calculatedFreeSpace,
+            "belowMinimum", minFreeSpaceToResupply,
             `(inside: ${campTroops.total}, transit: ${transitTroops.total}, cap: ${totalCap})`)
     }
 
@@ -577,12 +546,12 @@ async function resupplyBerimondCamp() {
         ?? []
 
     const totalAvailable = availableUnits.reduce((sum, u) => sum + u.amount, 0)
-    const sendable = Math.min(effectiveFreeSpace, totalAvailable - mainCastleReserve)
+    const sendable = Math.min(calculatedFreeSpace, totalAvailable - mainCastleReserve)
 
     // Less than one attack's worth isn't worth a transfer
     if (sendable < attackSolCount)
         return backOffResupply("notEnoughFoodRangedTroopsToResupplyBerimond",
-            "freeSpace", effectiveFreeSpace, "available", totalAvailable, "reserve", mainCastleReserve)
+            "freeSpace", calculatedFreeSpace, "available", totalAvailable, "reserve", mainCastleReserve)
 
     let remaining = sendable
     const units = []
@@ -606,7 +575,7 @@ async function resupplyBerimondCamp() {
         transferArrivesAt = lastResupplySentAt + getTransferRemainingMs(beriCastle)
         nextFreeSpaceCheckAt = Math.min(nextFreeSpaceCheckAt, transferArrivesAt + arrivalGraceMs)
         refreshAfterArrival = true
-        console.log("berimondResupplySent", sendable, "freeSpaceWas", effectiveFreeSpace, JSON.stringify(units),
+        console.log("berimondResupplySent", sendable, "freeSpaceWas", calculatedFreeSpace, JSON.stringify(units),
             "arrivesInSeconds", Math.round((transferArrivesAt - lastResupplySentAt) / 1000))
 
         if (!useSkipsForResupply)
