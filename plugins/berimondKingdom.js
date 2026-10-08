@@ -533,14 +533,12 @@ async function attackBerimond() {
     const ladder = useBerimondLadders
         ? (beriCastle.unitInventory?.find(u => u.amount > 0 && u.unitInfo?.type == "BerimondAntiLadder")
             ?? beriCastle.unitInventory?.find(u => u.amount > 0 && u.unitInfo?.type == "Ladder"))
-        : (beriCastle.unitInventory?.find(u => u.amount > 0 && u.unitInfo?.type == "Ladder")
-            ?? beriCastle.unitInventory?.find(u => u.amount > 0 && u.unitInfo?.type == "BerimondAntiLadder"))
+        : beriCastle.unitInventory?.find(u => u.amount > 0 && u.unitInfo?.type == "Ladder")
 
     const shield = useBerimondShields
         ? (beriCastle.unitInventory?.find(u => u.amount > 0 && u.unitInfo?.type == "BerimondAntiShields")
             ?? beriCastle.unitInventory?.find(u => u.amount > 0 && u.unitInfo?.type == "Shields"))
-        : (beriCastle.unitInventory?.find(u => u.amount > 0 && u.unitInfo?.type == "Shields")
-            ?? beriCastle.unitInventory?.find(u => u.amount > 0 && u.unitInfo?.type == "BerimondAntiShields"))
+        : beriCastle.unitInventory?.find(u => u.amount > 0 && u.unitInfo?.type == "Shields")
 
     const attackInfo = getAttackInfo(KingdomID.berimond, beriCastle, towerInfo, lord, 70, 1, pluginOptions, 0)
 
